@@ -1,0 +1,930 @@
+---
+title: "Summary maps for Brazil Explorations: Long-term dynamics and Correlation"
+output:
+  html_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(2, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", mai = rep(.1, 4))
+    else NULL
+  }
+)
+
+knitr::opts_chunk$set(echo       = TRUE,
+                      cache      = TRUE, 
+                      margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center")
+```
+
+```{css, echo=FALSE}
+pre {
+max-height: 300px;
+overflow-y: auto;
+}
+
+pre[class] {
+max-height: 100px;
+}
+```
+
+## Links to local data sets
+
+Here we use the following links to data.
+
+```{r}
+CASE_DATA_FOLDER <- "data/bra2_cases/"
+SF_DATA_FOLDER <- "data/bra2_sf/"
+POPULATION_DATA_FOLDER <- "data/bra2_population/"
+SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
+
+# raw data
+bra1_path <- file.path(SF_DATA_FOLDER, "bra1_sf_data.rds")
+bra2_path <- file.path(SF_DATA_FOLDER, "simplified_bra2_sf_data.rds")
+bra2_pop_data_path <- file.path(POPULATION_DATA_FOLDER, "bra2_population_data_2000_2014.rds")
+bra2_case_data_path <- file.path(CASE_DATA_FOLDER, "bra_DENV_case_data_2000_2014.rds")
+
+# processed index P summary data
+bra2_indexP_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_summary_data.Rdata")
+
+# processed indexP/case summary data
+bra2_entire_period_corr_log_incidence_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER,
+                                                             "region_entire_period_corr_phase_shift_log_incidence_data.Rdata")
+```
+
+Here, we define the file paths to the output. 
+
+```{r}
+SUMMARY_PLOTS_FOLDER <- "output/plots/"
+SUMMARY_RESULTS_FOLDER <- "output/results/"
+```
+
+Change them accordingly if you want to run the script locally on your computer.
+
+## Preambule
+
+This document compares the Index P and DENV incidence seasonality over the entire 14-year time frame. We perform the correlation analysis at the municipality level and the community level. 
+
+## Packages
+
+The needed packages:
+
+```{r message = FALSE}
+library(pacman)
+p_load(tidyverse, sf, RColorBrewer, cowplot, magrittr, igraph)
+```
+
+## Useful colour palettes
+
+```{r}
+levColors <- rev(brewer.pal(11, "RdYlBu")) # colourblind friendly
+```
+
+## Raw data
+
+### Case data
+
+We read in the raw case data at the municipality level in Brazil. 
+
+```{r}
+bra2_case_data <- readRDS(file=bra2_case_data_path)
+```
+
+Let's get the state/city to city id mapping, so we can add it to other sets of data for ease of data management later on. 
+
+```{r}
+city_cityid_mapping <- bra2_case_data %>%
+  select(city_id, state, city) %>%
+  unique()
+```
+
+### Spatial data 
+
+Here, we read in and format the spatial polygons data for Brazil. 
+
+```{r}
+bra1 <- readRDS(bra1_path) %>%
+  mutate(x=st_coordinates(st_centroid(geometry))[,1], y=st_coordinates(st_centroid(geometry))[,2])
+
+bra2 <- readRDS(bra2_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+### Population data
+
+Here, we read in the population data at the municipality level in Brazil. 
+
+```{r}
+bra2_pop_data <- readRDS(file=bra2_pop_data_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+## Processed summary data 
+
+### Index P data
+
+Here, we read in the Index P summary data at the municipality level in Brazil. 
+
+```{r}
+load(bra2_indexP_summary_data_path) #region_basic_summary_data
+bra2_indexP_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+```
+
+### Index P/case data
+
+Next, we read in the correlation summary data between Index P and log-incidence dynamics for the entire period.
+
+```{r}
+load(bra2_entire_period_corr_log_incidence_data_path) #region_entire_period_corr_opt_shift_data
+bra2_entire_period_corr_log_incidence_data <- region_entire_period_corr_opt_shift_data
+rm(region_entire_period_corr_opt_shift_data)
+```
+
+
+## Index P and Case Burden
+
+### Case burden 
+
+Let's compute the case burden in each municipality. 
+
+```{r}
+bra2_case_burden <- bra2_case_data %>% 
+  filter(!grepl(pattern="Município ignorado", x=city, fixed=TRUE)) %>%
+  group_by(city_id, state, city, year) %>%
+  summarise(cases=sum(cases, na.rm=FALSE), .groups="keep") %>% 
+  left_join(bra2_pop_data, by=c("state", "city", "year", "city_id")) %>%
+  mutate(incidence=cases/n) %>% 
+  as.data.frame() %>%
+  group_by(city_id, state, city) %>%
+  summarise(total_cases=sum(cases, na.rm=FALSE),
+            mean_yearly_cases=mean(cases, na.rm=FALSE),
+            median_yearly_cases=median(cases, na.rm=FALSE),
+            mean_yearly_incidence=mean(incidence, na.rm=FALSE)*10^5, 
+            median_yearly_incidence=median(incidence, na.rm=FALSE)*10^5, 
+            years_with_cases=sum(incidence!=0, na.rm=FALSE), .groups="keep") %>%
+  as.data.frame()
+```
+
+## Entire period correlation
+
+In this section, we show the correlation between Index P and incidence across the entire 15 year period from 2000 to 2014. In the first subsection, we show the correlation at the municipality level. In the next section, we aggregate municipalities into spatially contiguous groups according to the similarity of their Index P dynamics during a typical year and then compute the correlation between Index P and incidence at the level of these clusters in an effort to show the extent to which Index P is informative in explaining incidence dynamics across extended time intervals. 
+
+### Network
+
+In this subsection, we create a weighted network of municipalities with vertices representing municipalities and edges representing pair-wise correlations of Index P dynamics between neighbouring municipalities.
+
+Let's start by creating the weighted network. In particular, we start by creating an network where two municipalities are connected by edges if they share a geographical border and where edges are weighted according to the pair-wise correlation between the neighbours. 
+
+```{r}
+create_network <- function(bra2, bra2_indexP_typical_year_data) {
+  # define vertices
+  nodes <- as_tibble(data.frame(id=1:nrow(bra2), city_id=bra2$city_id, state=bra2$state, city=bra2$city))
+
+  # define edges between neighboring municipalities
+  edges <- st_intersects(bra2) %>% 
+    as.data.frame() %>% 
+    setNames(c("from", "to")) %>%
+    filter(from!=to)
+  
+  # manually add edges 
+  edges <- rbind(edges, c(from=as.numeric(nodes[which(nodes$city_id=="431850"), "id"]), 
+                          to=as.numeric(nodes[which(nodes$city_id=="432135"), "id"])))
+  edges <- rbind(edges, c(from=as.numeric(nodes[which(nodes$city_id=="315733"), "id"]), 
+                          to=as.numeric(nodes[which(nodes$city_id=="316880"), "id"])))
+  edges <- rbind(edges, c(from=as.numeric(nodes[which(nodes$city_id=="315733"), "id"]), 
+                          to=as.numeric(nodes[which(nodes$city_id=="316250"), "id"])))
+  edges <- rbind(edges, c(from=as.numeric(nodes[which(nodes$city_id=="431730"), "id"]), 
+                          to=as.numeric(nodes[which(nodes$city_id=="431560"), "id"])))
+  
+  # compute Index P corr for typical year between vertices connected by edges
+  corr <- rep(NA, nrow(edges))
+  for (ii in 1:nrow(edges)) {
+    this_city_id <- as.character(nodes[which(nodes$id==edges[ii, 1]), "city_id"])
+    that_city_id <- as.character(nodes[which(nodes$id==edges[ii, 2]), "city_id"])
+    if (any(!(c(this_city_id, that_city_id) %in% colnames(bra2_indexP_typical_year_data)))) {
+      pearson_corr <- NA
+    } else {
+      this_typical_year <- bra2_indexP_typical_year_data[, this_city_id]
+      that_typical_year <- bra2_indexP_typical_year_data[, that_city_id]
+      pearson_corr <- cor(x=this_typical_year, y=that_typical_year, method="pearson")
+    }
+    corr[ii] <- pearson_corr
+  }
+  edges %<>% 
+    mutate(corr=corr) %>% 
+    filter(!is.na(corr)) %>% 
+    mutate(weight=corr+1)
+  nodes %<>% semi_join(data.frame(id=edges$from), by="id")
+  
+  weighted_network_list <- list(vertices=nodes, edges=edges)
+  return(weighted_network_list)
+}
+bra2_indexP_typical_year_data <- bra2_indexP_summary_data[["normalised_typical_year_mean"]]
+no_data_columns <- which(apply(bra2_indexP_typical_year_data, 2, function(x) any(is.na(x))))
+bra2_indexP_typical_year_data <- bra2_indexP_typical_year_data[, -no_data_columns]
+weighted_network_list <- create_network(bra2, bra2_indexP_typical_year_data=bra2_indexP_typical_year_data)
+```
+Note that we exclude municipalities without Index P data (Bahia, Itaparica; Bahia, Madre de Deus; Pernambuco, Fernando de Noronha) and disconnected islands (Santa Catarina, Florianópolis; Bahia, Vera Cruz). This ensures that we can perform the clustering and that we are dealing with a connected graph. 
+
+Now, let's create a weighted network object. 
+
+```{r}
+weighted_network <- graph_from_data_frame(d=weighted_network_list[["edges"]], 
+                                          vertices=weighted_network_list[["vertices"]]) %>% as.undirected()
+```
+
+### Community partitioning 
+
+In this algorithm, we start by setting some threshold on the case data. For example, you could specify that no community can have fewer than 1000 cases per year on average. The algorithm then recursively divides the network into two communities. If one of the two daughter communities has fewer than 1000 cases per year on average, it is joined with the community within its parent network that it is most closely attached to. In this way, the network is broken down into communities with similar Index P dynamics and with sufficient data to produce meaningful infection dynamics. 
+
+```{r}
+cut_network <- function(network) {
+  community_structure <- cluster_fast_greedy(graph=network)
+  communities <- cut_at(community_structure, no=2)
+  communities <- data.frame(name=community_structure$names, community=communities) %>% 
+    left_join(as_data_frame(x=network, what="vertices"), by=c("name"))
+  
+  if (length(unique(pull(communities, community)))==1) return(communities)
+
+  community_aggregated_case_data <- bra2_incidence_data %>% 
+    right_join(communities, by=c("city_id", "state", "city")) %>% 
+    group_by(community, year) %>%
+    summarise(cases=sum(cases, na.rm=TRUE), .groups="keep") %>% 
+    group_by(community) %>% 
+    summarise(mean_yearly_cases=mean(cases), .groups="keep") %>% 
+    as.data.frame()
+  community1_mean_yearly_cases <- filter(community_aggregated_case_data, community==1)$mean_yearly_cases
+  community2_mean_yearly_cases <- filter(community_aggregated_case_data, community==2)$mean_yearly_cases
+  
+  if (community1_mean_yearly_cases>mean_yearly_cases_threshold && community2_mean_yearly_cases>mean_yearly_cases_threshold) {
+    # identify the groups of communities
+    new_network1 <- induced_subgraph(graph=network, vids=filter(communities, community==1)$name)
+    communities1 <- cut_network(new_network1)
+    new_network2 <- induced_subgraph(graph=network, vids=filter(communities, community==2)$name)
+    communities2 <- cut_network(new_network2)
+    
+    # ensure that the two groups of communities do not have the same ids
+    communities1_ids <- communities1$community
+    communities2_ids <- communities2$community
+    communities1_ids_in_communities2_ids <- unique(communities1_ids[communities1_ids %in% communities2_ids])
+    rep_communities1_ids <- (1:10^4)[which(!(1:10^4 %in% c(communities1_ids, communities2_ids)))][seq_along(communities1_ids_in_communities2_ids)]
+    new_communities1_ids <- communities1_ids
+    for (ii in communities1_ids_in_communities2_ids) {
+      new_communities1_ids[which(communities1_ids==communities1_ids_in_communities2_ids[ii])] <- rep_communities1_ids[ii]
+    }
+    names(new_communities1_ids) <- as.character(communities1_ids)
+    communities1 %<>% mutate(community=new_communities1_ids[as.character(community)])
+    
+    # join the two communities
+    communities <- rbind(communities1, communities2)
+    
+  } else if (community1_mean_yearly_cases>mean_yearly_cases_threshold && community2_mean_yearly_cases<=mean_yearly_cases_threshold) {
+    # identify the two groups of communities
+    new_network1 <- induced_subgraph(graph=network, vids=filter(communities, community==1)$name)
+    communities1 <- cut_network(new_network1)
+    communities2 <- filter(communities, community==2)
+    
+    # add the community that wasn't broken down to a neighboring community
+    neighboring_vertices <- unique(unlist(lapply(communities2$name, function(x) names(neighbors(graph=network, v=x)))))
+    neighboring_community_counts <- communities1 %>% 
+      filter(name %in% neighboring_vertices) %>% 
+      pull(community) %>% 
+      table() 
+    community_to_join <- names(neighboring_community_counts)[which(neighboring_community_counts==max(neighboring_community_counts))][1]
+    communities2 <- communities2 %>% mutate(community=as.numeric(community_to_join))
+    
+    # join the two communities
+    communities <- rbind(communities1, communities2)
+    
+  } else if (community1_mean_yearly_cases<=mean_yearly_cases_threshold && community2_mean_yearly_cases>mean_yearly_cases_threshold) {
+    # identify the two groups of communities
+    new_network2 <- induced_subgraph(graph=network, vids=filter(communities, community==2)$name)
+    communities2 <- cut_network(new_network2)
+    communities1 <- filter(communities, community==1)
+    
+    # add the community that wasn't broken down to a neighboring community
+    neighboring_vertices <- unique(unlist(lapply(communities1$name, function(x) names(neighbors(graph=network, v=x)))))
+    neighboring_community_counts <- communities2 %>% 
+      filter(name %in% neighboring_vertices) %>% 
+      pull(community) %>% 
+      table() 
+    community_to_join <- names(neighboring_community_counts)[which(neighboring_community_counts==max(neighboring_community_counts))][1]
+    communities1 <- communities1 %>% mutate(community=as.numeric(community_to_join))
+    
+    # join the two communities
+    communities <- rbind(communities1, communities2)
+  } else {
+    communities$community <- 1
+  }
+  return(communities)
+}
+```
+
+Let's run the modified community partitioning algorithm. 
+
+```{r eval=FALSE}
+bra2_incidence_data <- bra2_case_data %>% 
+  left_join(bra2_pop_data, by=c("city_id", "state", "city", "year")) %>% 
+  mutate(date=as.Date(paste(year, month, "2", sep="-")))
+mean_yearly_cases_threshold <- 10^3
+community_structure <- cut_network(network=weighted_network)
+saveRDS(community_structure, file=file.path(SUMMARY_RESULTS_FOLDER, 
+                                            "new_method_1000_threshold_community_structure.rds"))
+```
+
+Let's read in the output:
+
+```{r}
+community_structure <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                         "new_method_1000_threshold_community_structure.rds"))
+```
+
+Now, we will compute the some correlation summary statistics for each community according to the new partitioning. 
+
+```{r}
+# organize data
+communities <- community_structure
+bra2_incidence_data <- bra2_case_data %>% 
+  left_join(bra2_pop_data, by=c("city_id", "state", "city", "year")) %>% 
+  mutate(date=as.Date(paste(year, month, "2", sep="-"))) %>% 
+  select(-month, -year)
+bra2_indexP_data <- bra2_indexP_summary_data[["monthly_median"]] %>% 
+  as.data.frame() %>% 
+  gather(key="city_id", value="indexP", 2:ncol(.)) %>% 
+  mutate(date=as.Date(date, origin="1970-01-01"))
+
+# aggregate case data
+community_aggregated_case_data <- bra2_incidence_data %>% 
+  right_join(communities, by=c("city_id", "state", "city")) %>% 
+  group_by(community, date) %>%
+  summarise(cases=sum(cases, na.rm=TRUE), n=sum(n, na.rm=TRUE), .groups="keep") %>% 
+  ungroup() %>% 
+  mutate(incidence=cases/n*10^5) %>%
+  mutate(log_incidence=log(incidence+1))
+
+# aggregate index P data
+community_aggregated_indexP_data <- bra2_indexP_data %>%
+  right_join(communities, by="city_id") %>%
+  group_by(community, date) %>%
+  summarise(indexP=sum(indexP, na.rm=TRUE), .groups="keep")
+  
+# compute correlation of aggregate data within each community
+cor_data_list <- list()
+community_names <- community_structure %>% pull(community) %>% unique() %>% sort()
+for (jj in community_names) {
+  this_community_case_data <- community_aggregated_case_data %>% filter(community==jj)
+  this_community_indexP_data <- community_aggregated_indexP_data %>% filter(community==jj)
+  this_community_case_data %<>% 
+    mutate(adj_log_incidence=lowess(x=1:length(log_incidence), y=log_incidence, f=2/length(log_incidence))$y)
+  this_community_indexP_data %<>% 
+    mutate(adj_indexP=lowess(x=1:length(indexP), y=indexP, f=2/length(indexP))$y) 
+  community_data <- this_community_case_data %>% 
+    left_join(this_community_indexP_data, by=c("date", "community")) %>% 
+    arrange(-desc(date))
+  
+  phase_shifts <- (-5):6
+  phase_shift_cor <- rep(NA, length(phase_shifts))
+  for (kk in phase_shifts) {
+    if (kk>0) {
+      adj_log_incidence <- community_data$adj_log_incidence %>% tail(-kk)
+      adj_indexP <- head(community_data$adj_indexP, -kk)
+    } else if (kk<0) {
+      adj_log_incidence <- community_data$adj_log_incidence %>% head(kk)
+      adj_indexP <- tail(community_data$adj_indexP, kk)
+    } else {
+      adj_log_incidence <- community_data$adj_log_incidence
+      adj_indexP <- community_data$adj_indexP
+    }
+    community_cor <- cor(x=adj_indexP, y=adj_log_incidence, method="spearman")
+    phase_shift_cor[which(phase_shifts==kk)] <- community_cor
+  }
+  phase_shift_cor <- data.frame(community=jj, phase_shift=phase_shifts, cor=phase_shift_cor)
+  cor_data_list[[jj]] <- phase_shift_cor
+}
+community_corr_data <- do.call(rbind, cor_data_list)
+```
+
+Next, we systematically generate the community partitionings for a range of different thresholds. 
+
+```{r eval=FALSE}
+bra2_incidence_data <- bra2_case_data %>% 
+  left_join(bra2_pop_data, by=c("city_id", "state", "city", "year")) %>% 
+  mutate(date=as.Date(paste(year, month, "2", sep="-")))
+thresholds <- c(50, 100, 200, 500, 1000, 1500, 2000, 3000, 4000, 5000, 7500, 10000, 12500, 15000, 20000, 30000, 50000)
+community_structure_list <- list()
+for (ii in seq_along(thresholds)) {
+  print(thresholds[ii])
+  mean_yearly_cases_threshold <- thresholds[ii]
+  community_structure_list[[ii]] <- cut_network(network=weighted_network)
+}
+names(community_structure_list) <- thresholds
+saveRDS(community_structure_list, file=file.path(SUMMARY_RESULTS_FOLDER, 
+                                                 "new_method_community_structure_list.rds"))
+```
+
+Reading in the output:
+
+```{r}
+community_structure_list <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                              "new_method_community_structure_list.rds"))
+```
+
+Let's compute the correlation information for each community structure.
+
+```{r eval=FALSE}
+compute_corr_data <- function(community_structure, bra2_case_data, bra2_pop_data, bra2_indexP_summary_data) {
+  # organize data
+  communities <- community_structure
+  bra2_incidence_data <- bra2_case_data %>% 
+    left_join(bra2_pop_data, by=c("city_id", "state", "city", "year")) %>% 
+    mutate(date=as.Date(paste(year, month, "2", sep="-"))) %>% 
+    select(-month, -year)
+  bra2_indexP_data <- bra2_indexP_summary_data[["monthly_median"]] %>% 
+    as.data.frame() %>% 
+    gather(key="city_id", value="indexP", 2:ncol(.)) %>% 
+    mutate(date=as.Date(date, origin="1970-01-01"))
+  
+  # aggregate case data
+  community_aggregated_case_data <- bra2_incidence_data %>% 
+    right_join(communities, by=c("city_id", "state", "city")) %>% 
+    group_by(community, date) %>%
+    summarise(cases=sum(cases, na.rm=TRUE), n=sum(n, na.rm=TRUE), .groups="keep") %>% 
+    ungroup() %>% 
+    mutate(incidence=cases/n*10^5) %>%
+    mutate(log_incidence=log(incidence+1))
+  
+  # aggregate index P data
+  community_aggregated_indexP_data <- bra2_indexP_data %>%
+    right_join(communities, by="city_id") %>%
+    group_by(community, date) %>%
+    summarise(indexP=sum(indexP, na.rm=TRUE), .groups="keep")
+  
+  # compute correlation of aggregate data within each community
+  cor_data_list <- list()
+  community_names <- community_structure %>% pull(community) %>% unique() %>% sort()
+  for (jj in community_names) {
+    this_community_case_data <- community_aggregated_case_data %>% filter(community==jj)
+    this_community_indexP_data <- community_aggregated_indexP_data %>% filter(community==jj)
+    this_community_case_data %<>% 
+      mutate(adj_log_incidence=lowess(x=1:length(log_incidence), y=log_incidence, f=2/length(log_incidence))$y)
+    this_community_indexP_data %<>% 
+      mutate(adj_indexP=lowess(x=1:length(indexP), y=indexP, f=2/length(indexP))$y) 
+    community_data <- this_community_case_data %>% 
+      left_join(this_community_indexP_data, by=c("date", "community")) %>% 
+      arrange(-desc(date))
+    
+    phase_shifts <- (-5):6
+    phase_shift_cor <- rep(NA, length(phase_shifts))
+    for (kk in phase_shifts) {
+      if (kk>0) {
+        adj_log_incidence <- community_data$adj_log_incidence %>% tail(-kk)
+        adj_indexP <- head(community_data$adj_indexP, -kk)
+      } else if (kk<0) {
+        adj_log_incidence <- community_data$adj_log_incidence %>% head(kk)
+        adj_indexP <- tail(community_data$adj_indexP, kk)
+      } else {
+        adj_log_incidence <- community_data$adj_log_incidence
+        adj_indexP <- community_data$adj_indexP
+      }
+      community_cor <- cor(x=adj_indexP, y=adj_log_incidence, method="spearman")
+      phase_shift_cor[which(phase_shifts==kk)] <- community_cor
+    }
+    phase_shift_cor <- data.frame(community=jj, phase_shift=phase_shifts, cor=phase_shift_cor)
+    cor_data_list[[jj]] <- phase_shift_cor
+  }
+  community_corr_data <- do.call(rbind, cor_data_list)
+  return(community_corr_data)
+}
+community_corr_data_list <- purrr::map(community_structure_list, 
+                                       function(x) compute_corr_data(x, 
+                                                                     bra2_case_data=bra2_case_data, 
+                                                                     bra2_pop_data=bra2_pop_data, 
+                                                                     bra2_indexP_summary_data=bra2_indexP_summary_data))
+names(community_corr_data_list) <- names(community_structure_list)
+saveRDS(community_corr_data_list, file=file.path(SUMMARY_RESULTS_FOLDER, 
+                                                 "new_method_community_corr_data_list.rds"))
+```
+
+Reading in the output: 
+
+```{r}
+community_corr_data_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER, 
+                                                 "new_method_community_corr_data_list.rds"))
+
+baseline_community_corr_data <- bra2_entire_period_corr_log_incidence_data %>% 
+  left_join(mutate(bra2_case_burden, city_id=as.numeric(city_id)), by=c("city_id", "state", "city")) %>% 
+  filter(mean_yearly_cases>=12) %>% 
+  transmute(city_id=city_id, phase_shift=shift, cor=median)
+unique_city_ids <- unique(pull(baseline_community_corr_data, city_id))
+baseline_community_corr_data$community <- sapply(baseline_community_corr_data$city_id, function(x) which(unique_city_ids==x))
+baseline_community_corr_data %<>% select(community, phase_shift, cor)
+community_corr_data_list[["12"]] <- baseline_community_corr_data
+```
+
+## Figures
+
+First, we plot the summary figures for correlation, phase-shifted correlation and the phase shift between Index P and DENV incidence for the entire period from 2000 to 2014 at the municipality level. 
+
+```{r warning=FALSE}
+plot_raw_corr_complete_plots <- function(entire_period_corr_data, incidence_data, threshold, bra2, bra1, file_name) {
+  lag_entire_period_corr_data <- entire_period_corr_data %>% 
+    group_by(city_id, state, city) %>% 
+    summarise(opt_shift=ifelse(any(is.na(median)), NA, shift[which(median==max(median))]), 
+              opt_median=ifelse(any(is.na(median)), NA, max(median)), .groups="keep")
+  no_lag_entire_period_corr_data <- entire_period_corr_data %>%
+    filter(shift==0) %>% 
+    select(city_id, state, city, median)
+  entire_period_corr_data <- lag_entire_period_corr_data %>%
+    left_join(no_lag_entire_period_corr_data, by=c("city_id", "state", "city")) %>% 
+    left_join(mutate(incidence_data, city_id=as.numeric(city_id)), by=c("city_id", "state", "city")) %>%
+    mutate(median=ifelse(mean_yearly_cases<threshold, NA, median), 
+           opt_median=ifelse(mean_yearly_cases<threshold, NA, opt_median), 
+           opt_shift=ifelse(mean_yearly_cases<threshold, NA, opt_shift)) %>% 
+    left_join(mutate(bra2, city_id=as.numeric(city_id)), by=c("city_id", "state", "city")) %>% 
+    st_as_sf()
+  
+  # spatial map of correlations
+  corr_no_lag_plot <- ggplot() + 
+    geom_sf(data=entire_period_corr_data, 
+            mapping=aes(geometry=geometry), fill="grey", colour="darkgrey", lwd=0.1) + 
+    geom_sf(data=filter(entire_period_corr_data, !is.na(median)), 
+            mapping=aes(geometry=geometry, fill=median, color=median), lwd=0.1) + 
+    geom_sf(data=bra1, 
+            mapping=aes(geometry=geometry), fill=NA, color="black", lwd=0.1) + 
+    scale_fill_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", limits=c(-1, 1), 
+                         breaks=round(seq(-1, 1, 0.5), 1), labels=c("-1.0", "-0.5", " 0.0", " 0.5", " 1.0"), 
+                         guide=guide_colorbar(order=1, title.position="top", ticks.colour="black", frame.colour="black"), 
+                         name=NULL) + 
+    scale_color_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", guide="none", limits=c(-1, 1)) + 
+    scale_x_continuous(limits=c(-73, -36)) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(), 
+          axis.text=element_blank(), axis.title=element_blank(), 
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(legend.position="right", legend.title.align = 0.5, 
+          legend.key.width=unit(0.25, "cm"), legend.key.height=unit(1.25, "cm")) + 
+    theme(plot.margin=unit(c(0, 0.1, 0, 0), "cm"))
+  
+  # histogram of the distribution of possible correlations
+  mean_corr <- entire_period_corr_data %>% pull(median) %>% mean(na.rm=TRUE)
+  corr_no_lag_histogram <- ggplot() + 
+    geom_histogram(data=entire_period_corr_data, 
+                   mapping=aes(x=median), color="black", fill="white", binwidth=0.05) + 
+    geom_vline(xintercept=mean_corr, linetype="dashed", colour="red") + 
+    scale_x_continuous(limits=c(-1, 1), breaks=seq(-1, 1, 0.5), name=NULL) + 
+    #labs(x="Correlation") + 
+    theme_bw() + 
+    theme(axis.text.y=element_blank(), axis.title.y=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0.1, 0.1, 0.5), "cm"))
+  
+  # lag and correlation
+  boxplot_typical_year_corr_data <- entire_period_corr_data %>%
+    st_drop_geometry() %>%
+    filter(!is.na(median)) %>%
+    group_by(opt_shift) %>%
+    mutate(num_mun=length(city_id), percent_mun=length(city_id)/nrow(.))
+  opt_lag_boxplot <- ggplot() +
+    geom_boxplot(data=mutate(boxplot_typical_year_corr_data, opt_shift=factor(opt_shift, levels=(-5):6)),
+                 mapping=aes(x=opt_shift, y=median, fill=percent_mun*100)) +
+    geom_hline(yintercept=mean_corr, linetype="dashed", color="red") +
+    geom_hline(yintercept=0, linetype="solid", color="black") +
+    labs(x="Phase shift (months)", y="Correlation", fill="Percentage of muncipalities") +
+    scale_y_continuous(limits=c(-0.5, 0.5), breaks=seq(-0.5, 0.5, 0.25)) +
+    # scale_fill_gradientn(colors=rep(levColors, each=3), 
+    #                      guide=guide_colorbar(override.aes=list(fill=NA), title.position="top", ticks.colour="black", frame.colour="black"),
+    #                      breaks=c(0, 625, 1250), limits=c(0, 1300)) +
+    scale_fill_gradientn(colors=rep(levColors, each=3), 
+                         guide=guide_colorbar(override.aes=list(fill=NA), title.position="top", ticks.colour="black", frame.colour="black"),
+                         breaks=seq(0, 50, 10), limits=c(0, 50), labels=paste(seq(0, 50, 10), "%", sep="")) +
+    theme_bw() +
+    theme(legend.position="bottom", legend.title.align=0.4, legend.direction="horizontal", legend.margin=margin(0, 0, 0, 0), 
+          legend.key.width=unit(0.8, "cm"), legend.key.size=unit(0.5, "cm"), legend.key.height=unit(0.3, "cm"),
+          legend.title=element_text(size=9), legend.text=element_text(size=9))
+    # theme(legend.position=c(0.83, 0.85), legend.key.size=unit(0.25, "cm"), legend.direction="horizontal",
+    #       legend.background=element_blank(), legend.key.width=unit(0.55, "cm"),
+    #       legend.text=element_text(size=7), legend.title=element_text(size=7), legend.title.align=0.4)
+
+    # spatial map of correlations
+  corr_opt_lag_plot <- ggplot() +
+    geom_sf(data=entire_period_corr_data, 
+            mapping=aes(geometry=geometry), fill="grey", colour="darkgrey", lwd=0.1) + 
+    geom_sf(data=filter(entire_period_corr_data, !is.na(opt_median)), 
+            mapping=aes(geometry=geometry, fill=opt_median, color=opt_median), lwd=0.1) + 
+    geom_sf(data=bra1,
+            mapping=aes(geometry=geometry), fill=NA, color="black", lwd=0.1) +
+    scale_fill_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", limits=c(-1, 1),
+                         breaks=seq(-1, 1, 0.5), labels=c("-1.0", "-0.5", " 0.0", " 0.5", " 1.0"),
+                         guide=guide_colorbar(order=1, title.position="top", ticks.colour="black", frame.colour="black"),
+                         name=NULL) +
+    scale_color_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", guide="none", limits=c(-1, 1)) +
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) +
+    theme(legend.position="right", legend.title.align = 0.5, 
+          legend.key.width=unit(0.25, "cm"), legend.key.height=unit(1.25, "cm")) +
+    theme(plot.margin=unit(c(0, 0.1, 0, 0), "cm"))
+
+  mean_opt_corr <- entire_period_corr_data %>% pull(opt_median) %>% mean(na.rm=TRUE)
+  corr_lag_histogram <- ggplot() +
+    geom_histogram(data=entire_period_corr_data,
+                   mapping=aes(x=opt_median), color="black", fill="white", binwidth=0.05) +
+    geom_vline(xintercept=mean_opt_corr, linetype="dashed", colour="red") +
+    scale_x_continuous(limits=c(-1, 1), breaks=seq(-1, 1, 0.5), name=NULL) +
+    #labs(x="Phase shifted correlation") +
+    theme_bw() +
+    theme(axis.text.y=element_blank(), axis.title.y=element_blank()) +
+    theme(plot.margin=unit(c(0, 0.1, 0.1, 0.5), "cm"))
+  
+  scatter_data <- entire_period_corr_data %>% 
+    filter(!is.na(opt_median)) %>% 
+    mutate(log_mean_yearly_cases=log10(mean_yearly_cases)) %>% 
+    mutate(years_with_cases=factor(years_with_cases, 1:15))
+  scatter_plot <- ggplot(data=scatter_data) + 
+    geom_point(mapping=aes(x=years_with_cases, y=log_mean_yearly_cases, color=opt_median), position=position_jitter(w=0.1), size=1) + 
+    scale_color_gradientn(colors=rev(brewer.pal(11, "Spectral")),  
+                          guide=guide_colorbar(override.aes=list(fill=NA), title.position="top",
+                                               ticks.colour="black", frame.colour="black")) + 
+    scale_y_continuous(limits=c(1, 4.5), breaks=1:4, labels=str2expression(c("10", "10^{2}",  "10^{3}",  "10^{4}"))) + 
+    scale_x_discrete(drop=FALSE) + 
+    labs(x="Years with cases", y="Mean yearly incidence", color="Phase-shifted correlation") + 
+    theme_bw() + 
+    theme(legend.position=c(0.3, 0.8), legend.key.size=unit(0.4, "cm"), legend.direction="horizontal",
+          legend.background=element_blank(), legend.key.width=unit(0.75, "cm"),
+          legend.text=element_text(size=9), legend.title=element_text(size=9), legend.title.align=0.4)
+  
+  no_lag_corr_title <- ggdraw() + draw_label("Correlation") + theme(plot.margin=margin(0, 0, 0, 0))
+  lag_corr_title <- ggdraw() + draw_label("Phase-shifted correlation") + theme(plot.margin=margin(0, 0, 0, 0))
+
+  pB <- cowplot::plot_grid(corr_lag_histogram, corr_opt_lag_plot, ncol=1, rel_heights=c(1, 2))
+  pB <- cowplot::plot_grid(lag_corr_title, pB, ncol=1, rel_heights=c(0.1, 1))
+  pA <- cowplot::plot_grid(corr_no_lag_histogram, corr_no_lag_plot, ncol=1, rel_heights=c(1, 2))
+  pA <- cowplot::plot_grid(no_lag_corr_title, pA, ncol=1, rel_heights=c(0.1, 1))
+  pAB <- cowplot::plot_grid(pA, pB, labels=c("A", "B"), nrow=1)
+  pC <- cowplot::plot_grid(opt_lag_boxplot, ncol=1)
+  pCD <- cowplot::plot_grid(pC, scatter_plot, nrow=1, labels=c("C", "D"))
+  p <- cowplot::plot_grid(pAB, pCD, ncol=1, rel_heights=c(1.5, 0.75))
+  scale_factor=0.65
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(p)
+  a <- dev.off()
+}
+plot_raw_corr_complete_plots(entire_period_corr_data=bra2_entire_period_corr_log_incidence_data, 
+                             incidence_data=bra2_case_burden, 
+                             threshold=12, 
+                             bra2=bra2, bra1=bra1, file_name="entire_period_raw_corr_complete_plots.pdf")
+```
+
+Now, let's plot the community structure when the minimum threshold on the mean yearly cases per community is set to 1000. First, we need to determine the vertex colouring. 
+
+```{r}
+vertices <- as_data_frame(x=weighted_network, what="vertices") %>% pull(name) 
+communities <- community_structure$community %>% unique() %>% sort()
+assigned_colors <- rep(NA, length(vertices))
+possible_colors <- 1:12
+for (ii in seq_along(communities)) {
+  this_community <- communities[ii]
+  this_community_vertices <- filter(community_structure, community==this_community) %>% pull(name)
+  neighbors <- unique(unlist(lapply(this_community_vertices, function(x) names(neighbors(graph=weighted_network, v=x)))))
+  external_neighbors <- setdiff(neighbors, this_community_vertices)
+  external_neighbor_ids <- which(vertices %in% external_neighbors)
+  available_colors <- setdiff(possible_colors, unique(assigned_colors[external_neighbor_ids]))
+  if (length(available_colors)==0) {
+    print("Something is wrong!"); stop()
+  }
+  assigned_colors[which(vertices %in% this_community_vertices)] <- available_colors[sample.int(n=length(available_colors), size=1)]
+}
+names(assigned_colors) <- vertices
+```
+
+Now, let's plot the map of the community partitioning. 
+
+```{r}
+plot_network_communities_complete_plots <- function(community_structure, incidence_data, community_aggregated_case_data, 
+                                                    assigned_colors, bra2, file_name) {
+  case_data <- community_aggregated_case_data %>% 
+    mutate(year=lubridate::year(date)) %>%
+    group_by(community, year) %>%
+    summarise(cases=sum(cases), .groups="keep") %>%
+    ungroup() %>% group_by(community) %>% 
+    summarise(community_mean_yearly_cases=mean(cases), .groups="keep") %>% 
+    as.data.frame()
+  
+  community_structure %<>%
+    mutate(color=assigned_colors[as.character(name)]) %>% 
+    left_join(mutate(incidence_data, city_id=city_id), by=c("city_id", "state", "city")) %>% 
+    right_join(bra2, by=c("city_id", "state", "city")) %>% 
+    st_as_sf()
+  
+  #map the municipalities
+  num_colors <- (length(unique(assigned_colors)))
+  community_map <- ggplot() +
+    geom_sf(data=filter(community_structure, !is.na(community)),
+            mapping=aes(geometry=geometry, fill=as_factor(color), color=as_factor(color)), lwd=0.1) +
+    scale_fill_manual(values=colorRampPalette(brewer.pal(min(12, num_colors), "Paired"))(num_colors), na.value="black", guide="none") +
+    scale_color_manual(values=colorRampPalette(brewer.pal(min(12, num_colors), "Paired"))(num_colors), na.value="black", guide="none") +
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank(),
+          legend.title=element_blank()) +
+    theme(plot.margin=unit(c(0, 0.1, 0, 0), "cm"))
+  
+  # num municipalities per cluster
+  num_mun_data <- community_structure %>% 
+    st_drop_geometry() %>% 
+    group_by(community) %>% 
+    summarise(num_mun=length(city), .groups="keep") %>% 
+    as.data.frame()
+  
+  num_mun_histogram <- ggplot() + 
+    geom_histogram(data=num_mun_data,  
+                   mapping=aes(x=num_mun), color="black", fill="white", bins=20) + 
+    scale_x_continuous(name="Community size", trans="log10") +
+    labs(y="Number of communities") + 
+    theme_bw() + 
+    theme(plot.margin=unit(c(0.5, 0.2, 0.1, 0.1), "cm"))
+  
+  cases_histogram <- ggplot() + 
+    geom_histogram(data=case_data,  
+                   mapping=aes(x=community_mean_yearly_cases), color="black", fill="white", bins=20) + 
+    scale_x_continuous(breaks=signif(10^seq(3, 5, 0.5), 1), limits=c(10^3, 10^5), 
+                       labels=c("1,000", "3,000", "10,000", "30,000", "100,000"), trans="log10", name="Mean yearly cases") +
+    labs(y="Number of communities") + 
+    theme_bw() + 
+    theme(plot.margin=unit(c(0.5, 0.2, 0.1, 0.1), "cm"))
+  
+  pBC <- cowplot::plot_grid(num_mun_histogram, cases_histogram, labels=c("B", "C"), ncol=1)
+  pABC <- cowplot::plot_grid(community_map, pBC, labels=c("A", ""), nrow=1)
+  scale_factor=0.4
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(pABC)
+  a <- dev.off()
+}
+plot_network_communities_complete_plots(community_structure=community_structure, 
+                                        assigned_colors=assigned_colors, 
+                                        incidence_data=bra2_case_burden, 
+                                        community_aggregated_case_data=community_aggregated_case_data, 
+                                        bra2=bra2, 
+                                        file_name="network_communities_complete_plots.pdf")
+```
+
+Finally, let's plot the summary figures for correlation, phase-shifted correlation and the phase shift between Index P and DENV incidence for the entire period from 2000 to 2014 at the municipality level. 
+
+```{r}
+plot_corr_complete_plots <- function(communities, bra2, communities_corr_data, community_corr_data_list, file_name) {
+  
+  no_lag_community_corr_data <- communities_corr_data %>% 
+    filter(phase_shift==0) %>% 
+    transmute(community=community, median=cor)
+  lag_community_corr_data <- communities_corr_data %>%
+    group_by(community) %>% 
+    summarise(opt_shift=phase_shift[which(cor==max(cor))], opt_median=max(cor), .groups="keep")
+  community_corr_data <- no_lag_community_corr_data %>% 
+    left_join(lag_community_corr_data, by="community") %>% 
+    right_join(communities, by=c("community")) %>% 
+    right_join(bra2, by=c("city_id", "state", "city"))
+  
+  community_mean_corr <- rep(NA, length(community_corr_data_list))
+  for (ii in seq_along(community_corr_data_list)) {
+    this_community_corr_data <- community_corr_data_list[[ii]]
+    opt_shift_cor_data <- this_community_corr_data %>%
+      group_by(community) %>% 
+      summarise(phase_shift=phase_shift[which(cor==max(cor))], cor=max(cor), .groups="keep") %>% 
+      as.data.frame() 
+    community_mean_corr[ii] <- mean(opt_shift_cor_data$cor)
+  }
+  community_mean_corr <- data.frame(threshold=as.numeric(names(community_corr_data_list)), 
+                                    mean_corr=community_mean_corr)
+  # spatial map of correlations
+  corr_no_lag_plot <- ggplot() +
+    geom_sf(data=community_corr_data,
+            mapping=aes(geometry=geometry, fill=median, color=median), lwd=0.1) +
+    geom_sf(data=bra1,
+            mapping=aes(geometry=geometry), fill=NA, color="black", lwd=0.1) +
+    scale_fill_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", limits=c(-1, 1),
+                         breaks=round(seq(-1, 1, 0.5), 1), labels=c("-1.0", "-0.5", " 0.0", " 0.5", " 1.0"),
+                         guide=guide_colorbar(order=1, title.position="top", ticks.colour="black", frame.colour="black"),
+                         name=NULL) +
+    scale_color_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", guide="none", limits=c(-1, 1)) +
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) +
+    theme(legend.position="right", legend.title.align = 0.5,
+          legend.key.width=unit(0.25, "cm"), legend.key.height=unit(1.25, "cm")) +
+    theme(plot.margin=unit(c(0, 0.1, 0, 0), "cm"))
+  
+  # histogram of the distribution of possible correlations
+  mean_corr <- community_corr_data %>% pull(median) %>% mean(na.rm=TRUE)
+  corr_no_lag_histogram <- ggplot() + 
+    geom_histogram(data=community_corr_data, 
+                   mapping=aes(x=median), color="black", fill="white", binwidth=0.05) + 
+    geom_vline(xintercept=mean_corr, linetype="dashed", colour="red") + 
+    scale_x_continuous(limits=c(-1, 1), breaks=seq(-1, 1, 0.5), name=NULL) + 
+    #labs(x="Correlation") + 
+    theme_bw() + 
+    theme(axis.text.y=element_blank(), axis.title.y=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0.1, 0.1, 0.5), "cm"))
+  
+  # lag and correlation
+  boxplot_typical_year_corr_data <- community_corr_data %>%
+    select(community, median, opt_shift) %>% 
+    filter(!is.na(median)) %>%
+    unique() %>% 
+    group_by(opt_shift) %>%
+    mutate(num_mun=length(community), percent_mun=length(community)/nrow(.))
+  opt_lag_boxplot <- ggplot() +
+    geom_boxplot(data=mutate(boxplot_typical_year_corr_data, opt_shift=factor(opt_shift, levels=(-5):6)),
+                 mapping=aes(x=opt_shift, y=median, fill=percent_mun*100)) +
+    geom_hline(yintercept=mean_corr, linetype="dashed", color="red") +
+    geom_hline(yintercept=0, linetype="solid", color="black") +
+    labs(x="Phase shift (months)", y="Correlation", fill="Percentage of muncipalities") +
+    scale_y_continuous(limits=c(-0.5, 0.6), breaks=seq(-0.5, 0.5, 0.25)) +
+    scale_x_discrete(drop=FALSE) + 
+    # scale_fill_gradientn(colors=rep(levColors, each=3), 
+    #                      guide=guide_colorbar(override.aes=list(fill=NA), title.position="top",
+    #                                           ticks.colour="black", frame.colour="black"),
+    #                      breaks=c(0, 60, 120), limits=c(0, 120)) +
+    scale_fill_gradientn(colors=rep(levColors, each=3), 
+                         guide=guide_colorbar(override.aes=list(fill=NA), title.position="top",
+                                              ticks.colour="black", frame.colour="black"),
+                         breaks=c(0, 25, 50, 75), limits=c(0, 75), labels=paste(seq(0, 75, 25), "%", sep="")) +
+    theme_bw() +
+    theme(legend.position="bottom", legend.title.align=0.4, legend.direction="horizontal", legend.margin=margin(0, 0, 0, 0), 
+          legend.key.width=unit(0.8, "cm"), legend.key.size=unit(0.5, "cm"), legend.key.height=unit(0.3, "cm"),
+          legend.title=element_text(size=9), legend.text=element_text(size=9))
+  
+  # spatial map of correlations
+  corr_opt_lag_plot <- ggplot() +
+    geom_sf(data=community_corr_data,
+            mapping=aes(geometry=geometry, fill=opt_median, color=opt_median), lwd=0.1) +
+    geom_sf(data=bra1,
+            mapping=aes(geometry=geometry), fill=NA, color="black", lwd=0.1) +
+    scale_fill_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", limits=c(-1, 1),
+                         breaks=seq(-1, 1, 0.5), labels=c("-1.0", "-0.5", " 0.0", " 0.5", " 1.0"),
+                         guide=guide_colorbar(order=1, title.position="top", ticks.colour="black", frame.colour="black"),
+                         name=NULL) +
+    scale_color_gradientn(colours=rev(brewer.pal(11, "Spectral")), na.value="black", guide="none", limits=c(-1, 1)) +
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) +
+    theme(legend.position="right", legend.title.align = 0.5,
+          legend.key.width=unit(0.25, "cm"), legend.key.height=unit(1.25, "cm")) +
+    theme(plot.margin=unit(c(0, 0.1, 0, 0), "cm"))
+  
+  mean_opt_corr <- community_corr_data %>% pull(opt_median) %>% mean(na.rm=TRUE)
+  corr_lag_histogram <- ggplot() +
+    geom_histogram(data=community_corr_data,
+                   mapping=aes(x=opt_median), color="black", fill="white", binwidth=0.05) +
+    geom_vline(xintercept=mean_opt_corr, linetype="dashed", colour="red") +
+    scale_x_continuous(limits=c(-1, 1), breaks=seq(-1, 1, 0.5), name=NULL) +
+    #labs(x="Phase shifted correlation") +
+    theme_bw() +
+    theme(axis.text.y=element_blank(), axis.title.y=element_blank()) +
+    theme(plot.margin=unit(c(0, 0.1, 0.1, 0.5), "cm"))
+  
+  mean_corr_threshold_scatter_plot <- ggplot(data=community_mean_corr) + 
+    geom_line(mapping=aes(x=threshold, y=mean_corr)) + 
+    geom_point(mapping=aes(x=threshold, y=mean_corr)) + 
+    labs(x="Mean yearly cases threshold", y="Mean phase-shifted\ncorrelation") + 
+    scale_y_continuous(limits=c(0, 1), breaks=seq(0, 1, 0.1)) + 
+    scale_x_continuous(limits=c(10, 10^5), breaks=10^seq(1, 5, 1), trans="log10", labels=scales::comma) + 
+    theme_bw()
+  
+  no_lag_corr_title <- ggdraw() + draw_label("Correlation") + theme(plot.margin=margin(0, 0, 0, 0))
+  lag_corr_title <- ggdraw() + draw_label("Phase-shifted correlation") + theme(plot.margin=margin(0, 0, 0, 0))
+  
+  pB <- cowplot::plot_grid(corr_lag_histogram, corr_opt_lag_plot, ncol=1, rel_heights=c(1, 2))
+  pB <- cowplot::plot_grid(lag_corr_title, pB, ncol=1, rel_heights=c(0.1, 1))
+  pA <- cowplot::plot_grid(corr_no_lag_histogram, corr_no_lag_plot, ncol=1, rel_heights=c(1, 2))
+  pA <- cowplot::plot_grid(no_lag_corr_title, pA, ncol=1, rel_heights=c(0.1, 1))
+  pAB <- cowplot::plot_grid(pA, pB, labels=c("A", "B"), nrow=1)
+  pC <- cowplot::plot_grid(opt_lag_boxplot, ncol=1)
+  pCD <- cowplot::plot_grid(pC, mean_corr_threshold_scatter_plot, nrow=1, labels=c("C", "D"))
+  p <- cowplot::plot_grid(pAB, pCD, ncol=1, rel_heights=c(1.5, 0.75))
+  scale_factor=0.65
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(p)
+  a <- dev.off()
+}
+plot_corr_complete_plots(communities=community_structure, 
+                         bra2=bra2, 
+                         communities_corr_data=community_corr_data, 
+                         community_corr_data_list=community_corr_data_list, 
+                         file_name="entire_period_corr_complete_plots.pdf")
+```

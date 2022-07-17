@@ -1,0 +1,1327 @@
+---
+title: "Analysis of DENV in Brazil: Index P biome clustering"
+output:
+  html_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(2, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", mai = rep(.1, 4))
+    else NULL
+  }
+)
+
+knitr::opts_chunk$set(echo       = TRUE,
+                      cache      = TRUE, 
+                      margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center")
+```
+
+```{css, echo=FALSE}
+pre {
+max-height: 300px;
+overflow-y: auto;
+}
+
+pre[class] {
+max-height: 100px;
+}
+```
+
+## Links to local data sets
+
+Here we use the following links to data.
+
+```{r}
+CASE_DATA_FOLDER <- "data/bra2_cases/"
+SF_DATA_FOLDER <- "data/bra2_sf/"
+POPULATION_DATA_FOLDER <- "data/bra2_population/"
+SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
+
+# raw data 
+bra1_path <- file.path(SF_DATA_FOLDER, "bra1_sf_data.rds")
+bra2_path <- file.path(SF_DATA_FOLDER, "simplified_bra2_sf_data.rds")
+bra2_pop_data_path <- file.path(POPULATION_DATA_FOLDER, "bra2_population_data_2000_2014.rds")
+bra2_case_data_path <- file.path(CASE_DATA_FOLDER, "bra_DENV_case_data_2000_2014.rds")
+
+# processed climate summary data
+bra2_entire_period_temp_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_temperature_summary_data.Rdata")
+bra2_entire_period_hum_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_humidity_summary_data.Rdata")
+
+# processed index P summary data
+bra2_indexP_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_summary_data.Rdata")
+
+# processed case summary data
+bra2_log_incidence_typical_year_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER,
+                                                               "region_typical_year_log_incidence_data.Rdata")
+```
+
+Here, we define the file paths to the output. 
+
+```{r}
+SUMMARY_PLOTS_FOLDER <- "output/plots/"
+SUMMARY_RESULTS_FOLDER <- "output/results/"
+```
+
+Change them accordingly if you want to run the script locally on your computer.
+
+## Preambule
+
+This document performs the clustering analysis of the Index P dynamics during a typical year. We identify six distinct Index P biomes. 
+
+## Packages
+
+The needed packages:
+
+```{r message = FALSE}
+library(pacman)
+p_load(tidyverse, sf, RColorBrewer, ggpubr, cluster, cowplot, magrittr, factoextra, dendextend)
+```
+
+## Raw data
+
+### Case data
+
+We read in the raw case data at the municipality level in Brazil. 
+
+```{r}
+bra2_case_data <- readRDS(file=bra2_case_data_path)
+```
+
+Let's get the state/city to city id mapping, so we can add it to other sets of data for ease of data management later on. 
+
+```{r}
+city_cityid_mapping <- bra2_case_data %>%
+  select(city_id, state, city) %>%
+  unique()
+```
+
+### Spatial data 
+
+Here, we read in and format the spatial polygons data for Brazil. 
+
+```{r}
+bra1 <- readRDS(bra1_path) %>%
+  mutate(x=st_coordinates(st_centroid(geometry))[,1], y=st_coordinates(st_centroid(geometry))[,2])
+
+bra2 <- readRDS(bra2_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+### Population data
+
+Here, we read in the population data at the municipality level in Brazil. 
+
+```{r}
+bra2_pop_data <- readRDS(file=bra2_pop_data_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+## Processed summary data 
+
+### Climate data 
+
+We read in the climate data at the municipality level in Brazil. 
+
+```{r}
+load(bra2_entire_period_temp_summary_data_path) #region_basic_summary_data
+bra2_entire_period_temp_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+
+load(bra2_entire_period_hum_summary_data_path) #region_basic_summary_data
+bra2_entire_period_hum_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+```
+
+### Case data
+
+We read in the typical year data for the log-incidence in each municipality. 
+
+```{r}
+load(bra2_log_incidence_typical_year_summary_data_path) #region_typical_year_cases_data
+bra2_log_incidence_typical_year_summary_data <- region_typical_year_cases_data
+rm(region_typical_year_cases_data)
+```
+
+### Index P data
+
+Here, we read in the Index P summary data at the municipality level in Brazil. 
+
+```{r}
+load(bra2_indexP_summary_data_path) #region_basic_summary_data
+bra2_indexP_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+```
+
+## Case burden 
+
+Let's compute the case burden in each municipality. 
+
+```{r}
+bra2_case_burden <- bra2_case_data %>% 
+  filter(!grepl(pattern="Município ignorado", x=city, fixed=TRUE)) %>%
+  group_by(city_id, state, city, year) %>%
+  summarise(cases=sum(cases, na.rm=FALSE), .groups="keep") %>% 
+  left_join(bra2_pop_data, by=c("state", "city", "year", "city_id")) %>%
+  mutate(incidence=cases/n) %>% 
+  as.data.frame() %>%
+  group_by(city_id, state, city) %>%
+  summarise(total_cases=sum(cases, na.rm=FALSE),
+            mean_yearly_cases=mean(cases, na.rm=FALSE),
+            median_yearly_cases=median(cases, na.rm=FALSE),
+            mean_yearly_incidence=mean(incidence, na.rm=FALSE)*10^5, 
+            median_yearly_incidence=median(incidence, na.rm=FALSE)*10^5, 
+            years_with_cases=sum(incidence!=0, na.rm=FALSE), .groups="keep") %>%
+  as.data.frame()
+```
+
+## Clustering 
+
+In this section, we perform clustering analysis where municipalities are clustered according to the pairwise correlations of their Index P dynamics or incidence (log) dynamics during a typical year. We perform hierarchical clustering analysis using the Ward's method criterion which aims to minimise the total within-cluster variance. We attempt to identify the best number of clusters both visually and quantitatively. When constructing the dissimilarity matrix, we use the mean normalised typical year for each municipality and compute the Pearson correlation coefficient. We use Pearson correlation instead of Spearman correlation because we are interested not only in the strength of the monotonic relationship between two typical year curves but also the relative rates at which the curves rise and fall. The resultant clusters strictly reflect the different dynamics among the municipalities and do not say anything about the absolute magnitude of those dynamics, which certainly may vary within a given cluster.
+
+### Index P
+
+In this section, we attempt to identify clusters of Index P dynamics across Brazil to get an idea of the diversity of dynamics that are expected across of climatically diverse landscape. We then see what these clusters can tell us about the incidence dynamics, paying close attention to whether they result in specific incidence dynamics. 
+
+Let's start by computing the Pearson correlation coefficient of Index P during a typical year between each pair of municipalities to create a dissimilarity matrix. 
+
+```{r eval=FALSE}
+bra2_indexP_typical_year_data <- bra2_indexP_summary_data[["normalised_typical_year_mean"]]
+no_data_columns <- which(apply(bra2_indexP_typical_year_data, 2, function(x) any(is.na(x))))
+bra2_indexP_typical_year_data <- bra2_indexP_typical_year_data[, -no_data_columns]
+city_id_order <- colnames(bra2_indexP_typical_year_data[, -1])
+bra2_indexP_corr_matrix <- matrix(NA, ncol=length(city_id_order), nrow=length(city_id_order))
+for (ii in seq_along(city_id_order)) {
+  print(ii)
+  for (jj in seq_along(city_id_order)) {
+    spearman_cor <- cor(x=bra2_indexP_typical_year_data[, 1+ii], 
+                        y=bra2_indexP_typical_year_data[, 1+jj], 
+                        method="pearson")
+    if (is.na(spearman_cor)) {stop(); print(jj)}
+    bra2_indexP_corr_matrix[ii, jj] <- spearman_cor
+  }
+}
+bra2_indexP_dissimilarity_matrix <- 1 - bra2_indexP_corr_matrix
+saveRDS(bra2_indexP_dissimilarity_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                         "bra2_indexP_pearson_dissimilarity_matrix.rds"))
+saveRDS(city_id_order, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                      "bra2_indexP_pearson_dissimilarity_matrix_city_id_order.rds"))
+saveRDS(bra2_indexP_typical_year_data, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                      "bra2_indexP_typical_year_data.rds"))
+```
+
+Reading in the dissimilarity matrix for Index P during a typical year between each pair of municipalities. 
+
+```{r}
+bra2_indexP_dissimilarity_matrix <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                                      "bra2_indexP_pearson_dissimilarity_matrix.rds"))
+indexP_city_id_order <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                          "bra2_indexP_pearson_dissimilarity_matrix_city_id_order.rds"))
+bra2_indexP_typical_year_data <- readRDS(file.path(SUMMARY_RESULTS_FOLDER,
+                                                   "bra2_indexP_typical_year_data.rds"))
+```
+
+Let's perform hierarchical clustering using Ward's method criterion. 
+
+```{r eval=FALSE}
+indexP_hc <- agnes(x=bra2_indexP_dissimilarity_matrix, diss=TRUE, method = "ward")
+saveRDS(indexP_hc, file=file.path(SUMMARY_RESULTS_FOLDER, "bra2_indexP_pearson_hierarchial_clustering_ward.rds"))
+```
+
+```{r}
+indexP_hc <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER, "bra2_indexP_pearson_hierarchial_clustering_ward.rds"))
+```
+
+Now, we want to determine the optimal number of clusters to extract. Here, we focus on two methods: the elbow and silhouette methods. The elbow method computes the total within-cluster sum of squares (WSS) (a measure of compactness) for each $k$, taking the location of the bend in the resultant WSS as a function of $k$ plot as the appropriate number of clusters. Silhouette method measures how well each object lies within a cluster. The average silhouette of observation for each $k$ is computed and the optimal number of clusters is the one that maximizes the average silhouette over a range of possible values of $k$. 
+
+```{r eval=FALSE}
+elbow_method <- fviz_nbclust(bra2_indexP_dissimilarity_matrix, FUN=hcut, method="wss", k.max=10) + 
+  ggtitle("(A) Elbow method")
+silhouette_method <- fviz_nbclust(bra2_indexP_dissimilarity_matrix, FUN=hcut, method="silhouette", k.max=10) + 
+  ggtitle("(B) Silhouette method")
+plotlist <- list(elbow_method, silhouette_method)
+saveRDS(plotlist, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                 "indexP_pearson_hierarchical_clustering_ward_opt_cluster_plots.rds"))
+```
+
+Let's see whether we can identify an optimal number of clusters. 
+
+```{r}
+plotlist <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, "indexP_pearson_hierarchical_clustering_ward_opt_cluster_plots.rds"))
+pdf(file=file.path(SUMMARY_PLOTS_FOLDER, "indexP_hierarchical_clustering_ward_opt_cluster_plots.pdf"), w=12, h=8)
+print(cowplot::plot_grid(plotlist=plotlist, nrow=1))
+a <- dev.off()
+```
+For the elbow method, we are interested in the value for $k$ at which there is an elbow in the curve, which appears to happen at $k=2$ and $k=5$. In the silhouette method, the average silhouette is maximized when $k=2$ and when $k=6$. As such, these metrics seem to point to $k=2$ or $k=5$ or $k=6$ as the optimal number of clusters. We will have a look at all clustering with $k \in \{2, 3, 4, 5, 6\}$ to determine the optimal number of clusters that captures the diversity of dynamics with a few clusters as possible. 
+
+Let's investigate this further by plotting the clusters on a two dimensional plane along the first two principal components. Here, we will try and visually identify the optimal number of clusters that elucidates meaningful patterns in the Index P dynamics among the municipalities. We start by cutting the dendrogram according to the specified number of clusters. 
+
+```{r eval=FALSE}
+cuts <- 2:6
+indexP_hc_cut_list <- list()
+for (ii in seq_along(cuts)) {
+  print(ii)
+  indexP_hc_cut <- hcut(x=bra2_indexP_dissimilarity_matrix, 
+                        k = cuts[ii], isdiss=TRUE, hc_func="agnes", hc_method="ward.D")
+  indexP_hc_cut_list[[ii]] <- indexP_hc_cut
+}
+saveRDS(indexP_hc_cut_list, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                           "indexP_pearson_hierarchical_clustering_ward_cut_list.rds"))
+```
+
+Let's now create a cluster plot for each number of clusters (note: this takes a considerable amount of time so try to avoid running this chunk!). 
+
+```{r eval=FALSE}
+indexP_hc_cut_list <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                           "indexP_pearson_hierarchical_clustering_ward_cut_list.rds"))
+pdf(file=file.path(SUMMARY_PLOTS_FOLDER,
+                   "indexP_hierarchical_clustering_ward_2D_cluster_plots.pdf"), w=12, h=8)
+cuts <- 2:6
+for (ii in seq_along(cuts)) {
+  cluster_plot <- fviz_cluster(indexP_hc_cut_list[[ii]], ellipse.type = "convex", geom="point") + 
+    theme_bw()
+  print(cluster_plot)
+}
+a <- dev.off()
+```
+These cluster plots provide further evidence that indeed either $k=5$ or $k=6$ is the optimal number of clusters. Going from $k=4$ to $k=5$, we see that cluster four is split into two separate groups which are clearly different in space on the 2D plane. It is less clear, however, whether the additional partitioning in $k=6$ relative to $k=5$ is meaningful. As such, we will determine whether this is a meaningful partitioning by taking a look at the actual Index P dynamics in each of the clusters for $k=5$ and $k=6$. It is also worth noting that in $k=6$, for example, the clusters seem to morph into each other, which is likely a consequence of the fact that spectrum of possible Index P dynamics is continuous in Brazil, resulting in smooth transition from one cluster to the next. As such, our goal is not to identify completely disparate Index P dynamics but rather to categorize municipalities into loosely partitioned groups which discretize the possible Index P dynamics in Brazil in a way that can be easily visualized. 
+
+Next, let's have a look at the Index P dynamics of all the municipalities within each cluster for a specified number of clusters. 
+
+```{r}
+plot_indexP_cluster_individual_dynamics <- function(normalised_bra2_indexP_typical_year_data, 
+                                                    bra2_indexP_typical_year_data, 
+                                                    bra2, bra1, 
+                                                    indexP_clustering_data, city_id_order, num_clusters, file_name) {
+  
+  # organise the data
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_clusters) 
+  normalised_cluster_timeseries_list <- list()
+  normalised_cluster_summarised_timeseries_list <- list()
+  cluster_timeseries_list <- list()
+  cluster_summarised_timeseries_list <- list()
+  cluster_geometries_list <- list()
+  for (ii in 1:num_clusters) {
+    municipality_ids <- city_id_order[which(cut_indexP_clustering_data==ii)]
+    cluster_geometries_list[[ii]] <- bra2 %>% filter(city_id %in% municipality_ids)
+    
+    cluster_timeseries <- bra2_indexP_typical_year_data[, municipality_ids]
+    cluster_summarised_timeseries <- rowMeans(cluster_timeseries)
+    cluster_timeseries_list[[ii]] <- cluster_timeseries %>%
+      as.data.frame() %>%
+      setNames(municipality_ids) %>% 
+      mutate(month=1:12) %>% 
+      select(month, dplyr::everything()) %>%
+      gather(key="city_id", value="indexP", 2:ncol(.))
+    
+    normalised_cluster_timeseries <- normalised_bra2_indexP_typical_year_data[, municipality_ids]
+    normalised_cluster_summarised_timeseries <- rowMeans(normalised_cluster_timeseries)
+    normalised_cluster_timeseries_list[[ii]] <- normalised_cluster_timeseries %>%
+      as.data.frame() %>%
+      setNames(municipality_ids) %>% 
+      mutate(month=1:12) %>% 
+      select(month, dplyr::everything()) %>%
+      gather(key="city_id", value="indexP", 2:ncol(.))
+    
+    cluster_summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+    normalised_cluster_summarised_timeseries_list[[ii]] <- normalised_cluster_summarised_timeseries
+  }
+  cluster_summarised_timeseries <- do.call(cbind, cluster_summarised_timeseries_list) %>% 
+    as.data.frame() %>%
+    setNames(as.character(1:num_clusters)) %>% 
+    mutate(month=1:12) %>% 
+    select(month, dplyr::everything()) %>% 
+    gather(key="cluster", value="indexP", 2:ncol(.))
+  normalised_cluster_summarised_timeseries <- do.call(cbind, normalised_cluster_summarised_timeseries_list) %>% 
+    as.data.frame() %>%
+    setNames(as.character(1:num_clusters)) %>% 
+    mutate(month=1:12) %>% 
+    select(month, dplyr::everything()) %>% 
+    gather(key="cluster", value="indexP", 2:ncol(.))
+  
+  # plot the individual plots
+  pdf(file=file.path(SUMMARY_PLOTS_FOLDER, file_name), w=12, h=8)
+  for (ii in 1:num_clusters) {
+    cluster_timeseries <- cluster_timeseries_list[[ii]] %>% 
+      mutate(month=ifelse(month<7, month+12, month))
+    this_cluster_summarised_timeseries <- cluster_summarised_timeseries %>% 
+      filter(cluster==ii) %>% 
+      mutate(month=ifelse(month<7, month+12, month))
+    individual_cluster_dynamics <- ggplot() + 
+      geom_line(data=cluster_timeseries, mapping=aes(x=month, y=indexP, group=city_id), color="grey") + 
+      geom_line(data=this_cluster_summarised_timeseries, mapping=aes(x=month, indexP), 
+                color="steelblue", lwd=2) + 
+      scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6))) + 
+      theme_bw() 
+    
+    normalised_cluster_timeseries <- normalised_cluster_timeseries_list[[ii]] %>% 
+      mutate(month=ifelse(month<7, month+12, month))
+    this_normalised_cluster_summarised_timeseries <- normalised_cluster_summarised_timeseries %>% 
+      filter(cluster==ii) %>% 
+      mutate(month=ifelse(month<7, month+12, month))
+    normalised_individual_cluster_dynamics <- ggplot() + 
+      geom_line(data=normalised_cluster_timeseries, mapping=aes(x=month, y=indexP, group=city_id), color="grey") + 
+      geom_line(data=this_normalised_cluster_summarised_timeseries, mapping=aes(x=month, indexP), 
+                color="steelblue", lwd=2) + 
+      scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6))) + 
+      theme_bw() 
+    
+    cluster_geometry <- cluster_geometries_list[[ii]]
+    cluster_map <- ggplot() + 
+      geom_sf(data=cluster_geometry, mapping=aes(geometry=geometry), fill="red", color="red", lwd=0) + 
+      geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) + 
+      theme(panel.grid=element_blank(), axis.line=element_blank(),
+            axis.text=element_blank(), axis.title=element_blank(),
+            panel.background=element_blank(), axis.ticks=element_blank())
+    p <- cowplot::plot_grid(normalised_individual_cluster_dynamics, individual_cluster_dynamics, nrow=2)
+    p <- cowplot::plot_grid(p, cluster_map, nrow=1, rel_widths=c(1, 0.4))
+    print(p)
+  }
+  a <- dev.off()
+}
+```
+
+```{r}
+for (ii in 6) {
+  plot_indexP_cluster_individual_dynamics(bra2_indexP_typical_year_data=bra2_indexP_summary_data[["typical_year_mean"]], 
+                                          normalised_bra2_indexP_typical_year_data=bra2_indexP_typical_year_data,
+                                          bra2=bra2, bra1=bra1, 
+                                          indexP_clustering_data=indexP_hc, 
+                                          city_id_order=indexP_city_id_order, 
+                                          num_clusters=ii, 
+                                          file_name=paste0("indexP_clustering_individual_dynamics_", ii, "Clusters.pdf"))
+}
+```
+We can quite clearly that when the municipalities are partitioned into two or three clusters there is still a considerable degree of variability in the dynamics within each cluster, suggesting that both two and three clusters are insufficient. When the municipalities are partitioned into four clusters, we are presented with the "Roraima" dynamics which consist of a peak in October and a trough in February, quite unlike any of the other cluster dynamics which all peak in the months of December to May. With five clusters, we can identify the "Amapa" dynamics which are characterised by a trough in October and a slow rise to a peak in May. The inclusion of any additional cluster to make six clusters splits the "Amazon" cluster into two clusters, which peak around the same time but have discernibly different season lengths.
+
+Let's take a look at the aggregated Index P dynamics of each cluster for a specific number of clusters. 
+
+```{r}
+plot_indexP_cluster_aggregated_dynamics <- function(bra2_indexP_typical_year_data, bra2, bra1, 
+                                                    indexP_clustering_data, city_id_order, num_clusters, file_name) {
+  
+  # organise the data
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_clusters) 
+  cluster_summarised_timeseries_list <- list()
+  for (ii in 1:num_clusters) {
+    municipality_ids <- city_id_order[which(cut_indexP_clustering_data==ii)]
+    cluster_timeseries <- bra2_indexP_typical_year_data[, municipality_ids]
+    cluster_summarised_timeseries <- rowMeans(cluster_timeseries)
+    cluster_summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+  }
+  cluster_summarised_timeseries <- do.call(cbind, cluster_summarised_timeseries_list) %>% 
+    as.data.frame() %>%
+    setNames(as.character(1:num_clusters)) %>% 
+    mutate(month=1:12) %>% 
+    select(month, dplyr::everything()) %>% 
+    gather(key="cluster", value="indexP", 2:ncol(.)) %>% 
+    mutate(cluster=factor(cluster, 1:num_clusters))
+  bra2 %<>% 
+    left_join(data.frame(city_id=city_id_order, cluster=cut_indexP_clustering_data), by="city_id") %>% 
+    mutate(cluster=factor(cluster, 1:num_clusters))
+  
+  # plot the individual plots
+  pdf(file=file.path(SUMMARY_PLOTS_FOLDER, file_name), w=12, h=8)
+  this_cluster_summarised_timeseries <- cluster_summarised_timeseries %>% 
+    mutate(month=ifelse(month<7, month+12, month))
+  aggregated_cluster_dynamics <- ggplot() + 
+    geom_line(data=this_cluster_summarised_timeseries, mapping=aes(x=month, y=indexP, color=cluster), 
+              lwd=2) + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6))) + 
+    theme_bw() 
+  
+  cluster_map <- ggplot() + 
+    geom_sf(data=bra2, mapping=aes(geometry=geometry, color=cluster, fill=cluster), lwd=0) + 
+    geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank())
+  
+  print(cowplot::plot_grid(aggregated_cluster_dynamics, cluster_map, nrow=1, rel_widths=c(1, 0.4)))
+  a <- dev.off()
+  
+}
+ii <- 6
+plot_indexP_cluster_aggregated_dynamics(bra2_indexP_typical_year_data=bra2_indexP_summary_data[["typical_year_mean"]], 
+                                        bra2=bra2, bra1=bra1, 
+                                        indexP_clustering_data=indexP_hc, 
+                                        city_id_order=indexP_city_id_order, 
+                                        num_clusters=ii, 
+                                        file_name=paste0("indexP_clustering_aggregated_dynamics_", ii, "Clusters.pdf"))
+```
+Here, we focus on $k=6$. What is perhaps the most striking about this clustering is how spatially contiguous the clusters are. These clusters give us an idea of the possible dynamics of transmission potential across space and point to potential ways in which incidence may manifest differently across municipalities in Brazil. 
+
+### DENV incidence dynamics within Index P biomes
+
+In this section, we explore the Index P clustering that we derived and try to understand how it maps over to the observed incidence dynamics. We see whether each Index P cluster maps over to a specific behaviour in the incidence dynamics, and if a cluster maps over to multiple distinct behaviours, we try to break down the Index P cluster further to try to recover these behaviours.
+
+Let's start by organizing the incidence data. Here, we adjust the incidence data to only include municipalities with a positive number of cases per year (median). We provide this data as an alternative to the complete data, in the case that the municipalities with non-meaningful infection dynamics are obstrucing the clustering process. 
+
+```{r}
+adj_bra2_log_incidence_typical_year_data <- bra2_log_incidence_typical_year_summary_data %>% 
+  left_join(mutate(bra2_case_burden, city_id=as.numeric(city_id)), by=c("city_id", "state", "city")) %>% 
+  filter(mean_yearly_cases>=12) %>% 
+  filter(!is.na(cases)) %>% 
+  group_by(city_id) %>% 
+  mutate(norm_cases=(cases-min(cases))/(max(cases)-min(cases))) %>% 
+  as.data.frame()
+```
+
+Visually, it is quite difficult to determine whether there are multiple different dynamics within a given cluster. As such, we perform some clustering analysis to identify the optimal number of clusters for the incidence dynamics within each Index P cluster. 
+
+We start by computing the Pearson correlation coefficient of Incidence during a typical year between each pair of municipalities. 
+
+```{r eval=FALSE}
+compute_diss_matrix <- function(typical_year_data, city_id_order) {
+  corr_matrix <- matrix(NA, ncol=length(city_id_order), nrow=length(city_id_order))
+  for (ii in seq_along(city_id_order)) {
+    print(ii)
+    for (jj in seq_along(city_id_order)) {
+      corr <- cor(x=typical_year_data[, ii], 
+                  y=typical_year_data[, jj], 
+                  method="pearson")
+      if (is.na(corr)) {stop(); print(jj)}
+      corr_matrix[ii, jj] <- corr
+    }
+  }
+  diss_matrix <- 1 - corr_matrix
+  return(diss_matrix)
+}
+
+# complete data
+bra2_log_incidence_typical_year_matrix <- bra2_log_incidence_typical_year_summary_data %>% 
+  filter(!is.na(cases)) %>% 
+  select(city_id, month, cases) %>%
+  spread(key="city_id", value="cases") %>% 
+  as.matrix()
+no_case_columns <- which(apply(bra2_log_incidence_typical_year_matrix, 2, function(x) all(x==0)))
+if (length(no_case_columns)!=0) bra2_log_incidence_typical_year_matrix <- bra2_log_incidence_typical_year_matrix[, -no_case_columns]
+bra2_log_incidence_typical_year_matrix <- bra2_log_incidence_typical_year_matrix[, -1]
+city_id_order <- colnames(bra2_log_incidence_typical_year_matrix)
+
+# bra2_log_incidence_diss_matrix <- compute_diss_matrix(bra2_log_incidence_typical_year_matrix, city_id_order)
+# saveRDS(bra2_log_incidence_diss_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+#                                                        "bra2_log_incidence_pearson_dissimilarity_matrix.rds"))
+# saveRDS(city_id_order, file=file.path(SUMMARY_RESULTS_FOLDER,
+#                                       "bra2_log_incidence_pearson_dissimilarity_matrix_city_id_order.rds"))
+# saveRDS(bra2_log_incidence_typical_year_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+#                                                                "bra2_log_incidence_typical_year_matrix.rds"))
+
+# adjusted data without municipalities with insufficient case data
+adj_bra2_log_incidence_typical_year_matrix <- bra2_log_incidence_typical_year_summary_data %>% 
+  filter(!is.na(cases)) %>% 
+  left_join(mutate(bra2_case_burden, city_id=as.numeric(city_id)),  by=c("city_id", "state", "city")) %>% 
+  filter(mean_yearly_cases>=12) %>%
+  select(city_id, month, cases) %>%
+  spread(key="city_id", value="cases") %>% 
+  as.matrix()
+no_case_columns <- which(apply(adj_bra2_log_incidence_typical_year_matrix, 2, function(x) all(x==0)))
+if (length(no_case_columns)!=0) adj_bra2_log_incidence_typical_year_matrix <- adj_bra2_log_incidence_typical_year_matrix[, -no_case_columns]
+adj_bra2_log_incidence_typical_year_matrix <- adj_bra2_log_incidence_typical_year_matrix[, -1]
+adj_city_id_order <- colnames(adj_bra2_log_incidence_typical_year_matrix)
+
+adj_bra2_log_incidence_diss_matrix <- compute_diss_matrix(adj_bra2_log_incidence_typical_year_matrix, adj_city_id_order)
+saveRDS(adj_bra2_log_incidence_diss_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                           "adj_bra2_log_incidence_pearson_dissimilarity_matrix.rds"))
+saveRDS(adj_city_id_order, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                          "adj_bra2_log_incidence_pearson_dissimilarity_matrix_city_id_order.rds"))
+saveRDS(adj_bra2_log_incidence_typical_year_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                                   "adj_bra2_log_incidence_typical_year_matrix.rds"))
+```
+
+Reading in the dissimilarity matrix for log-incidence during a typical year between each pair of municipalities. To prevent municipalities with non-meaningful infection dynamics from obscuring the clustering algorithm, we focus on the adjusted incidence data set which only considers municipalities with at least 12 cases per year (mean). 
+
+```{r}
+bra2_log_incidence_diss_matrix <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                                    "adj_bra2_log_incidence_pearson_dissimilarity_matrix.rds"))
+incidence_city_id_order <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                             "adj_bra2_log_incidence_pearson_dissimilarity_matrix_city_id_order.rds"))
+bra2_log_incidence_typical_year_matrix <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                                            "adj_bra2_log_incidence_typical_year_matrix.rds"))
+```
+
+Let's perform hierarchical clustering using Ward's method criterion for the municipalities within each Index P cluster.  
+
+```{r eval=FALSE}
+NUM_CLUSTERS <- 6
+cut_indexP_clustering_data <- cutree(indexP_hc, k=NUM_CLUSTERS)
+cluster_bra2_log_incidence_diss_matrices_list <- list()
+cluster_bra2_log_incidence_city_id_order_list <- list()
+cluster_bra2_log_incidence_hc_list <- list()
+for (ii in 1:NUM_CLUSTERS) {
+  municipality_ids <- indexP_city_id_order[which(cut_indexP_clustering_data==ii)]
+  municipality_ids <- municipality_ids[sapply(municipality_ids, 
+                                              function(x) x %in% colnames(bra2_log_incidence_typical_year_matrix))]
+  municipality_pos <- sapply(municipality_ids, function(x) which(colnames(bra2_log_incidence_typical_year_matrix)==x))
+  cluster_bra2_log_incidence_diss_matrix <- bra2_log_incidence_diss_matrix[municipality_pos, municipality_pos]
+  log_incidence_hc <- agnes(x=cluster_bra2_log_incidence_diss_matrix, diss=TRUE, method = "ward")
+
+  cluster_bra2_log_incidence_diss_matrices_list[[ii]] <- cluster_bra2_log_incidence_diss_matrix
+  cluster_bra2_log_incidence_city_id_order_list[[ii]] <- municipality_ids
+  cluster_bra2_log_incidence_hc_list[[ii]] <- log_incidence_hc
+}
+saveRDS(cluster_bra2_log_incidence_hc_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_adj_bra2_log_incidence_pearson_hierarchial_clustering_ward_list.rds"))
+saveRDS(cluster_bra2_log_incidence_diss_matrices_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_adj_bra2_log_incidence_diss_matrix_list.rds"))
+saveRDS(cluster_bra2_log_incidence_city_id_order_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_adj_bra2_log_incidence_city_id_order_list.rds"))
+```
+
+```{r}
+cluster_bra2_log_incidence_hc_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_adj_bra2_log_incidence_pearson_hierarchial_clustering_ward_list.rds"))
+cluster_bra2_log_incidence_diss_matrices_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_adj_bra2_log_incidence_diss_matrix_list.rds"))
+cluster_bra2_log_incidence_city_id_order_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_adj_bra2_log_incidence_city_id_order_list.rds"))
+```
+
+Now, we want to determine the optimal number of clusters to extract for each Index P cluster. Here, we focus on two methods: the elbow and silhouette methods. 
+
+```{r eval=FALSE}
+NUM_CLUSTERS <- 6
+plot_list <- list()
+for (ii in 1:NUM_CLUSTERS) {
+  print(ii)
+  elbow_method <- fviz_nbclust(cluster_bra2_log_incidence_diss_matrices_list[[ii]], FUN=hcut, method="wss", k.max=10) + 
+    ggtitle("(A) Elbow method")
+  silhouette_method <- fviz_nbclust(cluster_bra2_log_incidence_diss_matrices_list[[ii]], FUN=hcut, method="silhouette", k.max=10) + 
+    ggtitle("(B) Silhouette method")
+  cluster_plot_list <- list(elbow_method, silhouette_method)
+  plot_list[[ii]] <- cluster_plot_list
+}
+saveRDS(plot_list, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                  "cluster_adj_log_incidence_pearson_hierarchical_clustering_ward_opt_cluster_plots.rds"))
+```
+
+Let's see whether we can identify an optimal number of clusters for each index P cluster. 
+
+```{r}
+pdf(file=file.path(SUMMARY_PLOTS_FOLDER, 
+                   "cluster_adj_log_incidence_hierarchical_clustering_ward_opt_cluster_plots.pdf"), w=12, h=8)
+plotlist <- readRDS(file.path(SUMMARY_RESULTS_FOLDER,
+                              "cluster_adj_log_incidence_pearson_hierarchical_clustering_ward_opt_cluster_plots.rds"))
+NUM_CLUSTERS <- 6
+for (ii in 1:NUM_CLUSTERS) {
+  cluster_plotlist <- plotlist[[ii]]
+  print(cowplot::plot_grid(plotlist=cluster_plotlist, nrow=1))
+}
+a <- dev.off()
+```
+As we will show later on, these optimal clusterings are not terribly important since the diversity of incidence dynamics follows a continuous spectrum with no clear delineations. 
+
+Let's investigate this further by plotting the clusters on a two dimensional plane along the first two principal components. Here, we will try and visually identify the optimal number of clusters that elucidates meaningful patterns in the incidence dynamics among the municipalities within each Index P cluster. We start by cutting the dendrogram according to the specified number of clusters. 
+
+```{r eval=FALSE}
+NUM_CLUSTERS <- 6
+cuts_list <- list(2:5, 2:3, 2:3, 2:5, 2:3, 2:5)
+incidence_hc_cut_list <- list()
+for (ii in 1:NUM_CLUSTERS) {
+  cluster_incidence_hc_cut_list <- list()
+  cuts <- cuts_list[[ii]]
+  for (jj in seq_along(cuts)) {
+    cluster_incidence_hc_cut_list[[jj]] <- hcut(x=cluster_bra2_log_incidence_diss_matrices_list[[ii]], 
+                                           k = cuts[jj], isdiss=TRUE, hc_func="agnes", hc_method="ward.D")
+  }
+   incidence_hc_cut_list[[ii]] <- cluster_incidence_hc_cut_list
+}
+saveRDS(incidence_hc_cut_list, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                           "cluster_adj_log_incidence_pearson_hierarchical_clustering_ward_cut_list.rds"))
+```
+
+Let's now create a cluster plot for each number of clusters (note: this takes a considerable amount of time so try to avoid running this chunk!). 
+
+```{r eval=FALSE}
+incidence_hc_cut_list <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                           "cluster_adj_log_incidence_pearson_hierarchical_clustering_ward_cut_list.rds"))
+NUM_CLUSTERS <- 6 
+cuts_list <- list(2:5, 2:3, 2:3, 2:5, 2:3, 2:5)
+for (ii in 1:NUM_CLUSTERS) {
+  print(ii)
+  pdf(file=file.path(SUMMARY_PLOTS_FOLDER,
+                     paste0("cluster_log_incidence_hierarchical_clustering_ward_2D_cluster_plots", ii, ".pdf")), w=12, h=8)
+  cluster_incidence_hc_cut_list <- incidence_hc_cut_list[[ii]]
+  cuts <- cuts_list[[ii]]
+  for (jj in seq_along(cuts)) {
+    print(jj)
+    cluster_plot <- fviz_cluster(cluster_incidence_hc_cut_list[[jj]], ellipse.type = "convex", geom="point") + 
+      theme_bw()
+    print(cluster_plot)
+  }
+  a <- dev.off()
+}
+```
+For clusters 1, 2, 3 and 4, we see a clear continuum as one cluster smoothly transitions into the next suggesting that there is no clear separation between clusters. This is probably due to the fact that the Index P clusters also smoothly transition from one to another. For cluster 5 (the Roraima cluster), there are at least two distinct clusters that do not smoothly transition between each other, pointing to the presence of distinct dynamics in the Roraima cluster. Cluster 6 also appears to have at least two distinct clusters pointing to the presence of distinct, non-continuous incidence dynamics in the Amapa cluster. 
+
+Now, let's plot the aggregated incidence dynamics for the optimal number of clusters in each Index P cluster.
+
+```{r}
+plot_cluster_log_incidence_aggregated_dynamics <- function(bra2_log_incidence_typical_year_data, bra1, bra2, 
+                                                           num_indexP_clusters, indexP_clustering_data, indexP_city_id_order, 
+                                                           num_clusters_list, log_incidence_clustering_data_list, city_id_order_list, file_name) {
+  
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_indexP_clusters)
+  bra2 %<>% 
+    left_join(data.frame(city_id=indexP_city_id_order, indexP_cluster=cut_indexP_clustering_data), by="city_id")
+  
+  # organise the data
+  summarised_timeseries_list <- list()
+  cluster_bra2_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    log_incidence_clustering_data <- log_incidence_clustering_data_list[[ii]]
+    num_clusters <- num_clusters_list[[ii]]
+    city_id_order <- city_id_order_list[[ii]]
+    
+    cut_log_incidence_clustering_data <- cutree(log_incidence_clustering_data, k=num_clusters) 
+    cluster_summarised_timeseries_list <- list()
+    for (jj in 1:num_clusters) {
+      municipality_ids <- city_id_order[which(cut_log_incidence_clustering_data==jj)]
+      cluster_timeseries <- bra2_log_incidence_typical_year_data[, municipality_ids]
+      cluster_summarised_timeseries <- rowMeans(cluster_timeseries)
+      cluster_summarised_timeseries_list[[jj]] <- cluster_summarised_timeseries
+    }
+    cluster_summarised_timeseries <- do.call(cbind, cluster_summarised_timeseries_list) %>% 
+      as.data.frame() %>%
+      setNames(as.character(1:num_clusters)) %>% 
+      mutate(month=1:12) %>% 
+      select(month, dplyr::everything()) %>% 
+      gather(key="cluster", value="incidence", 2:ncol(.)) %>% 
+      mutate(indexP_cluster=ii, cluster=as.numeric(cluster)) %>% 
+      select(indexP_cluster, cluster, month, incidence)
+    summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+    
+    cluster_bra2 <- bra2 %>% 
+      left_join(data.frame(city_id=city_id_order, incidence_cluster=cut_log_incidence_clustering_data), by="city_id") %>% 
+      mutate(incidence_cluster=factor(incidence_cluster, 1:num_clusters))
+    cluster_bra2_list[[ii]] <- cluster_bra2
+  }
+  summarised_timeseries <- do.call(rbind, summarised_timeseries_list) %>% 
+    as.data.frame() %>% 
+    mutate(id=3^indexP_cluster*2^cluster)
+  
+  # plot the aggregate plot
+  summarised_timeseries %<>% 
+    mutate(month=ifelse(month<7, month+12, month)) %>% 
+    mutate(indexP_cluster=factor(indexP_cluster, levels=1:num_indexP_clusters))
+  
+  all_aggregated_cluster_dynamics <- ggplot() + 
+    geom_line(data=summarised_timeseries %>% filter(indexP_cluster %in% 1:6),
+              mapping=aes(x=month, y=incidence, color=indexP_cluster, group=id), lwd=2) + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6))) + 
+    scale_color_discrete(drop=FALSE) + 
+    theme_bw()
+  indexP_cluster_map <- ggplot() + 
+      geom_sf(data=mutate(bra2, indexP_cluster=factor(indexP_cluster, 1:num_indexP_clusters)),  
+              mapping=aes(geometry=geometry, color=indexP_cluster, fill=indexP_cluster), lwd=0) + 
+      geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) +
+      theme(panel.grid=element_blank(), axis.line=element_blank(),
+            axis.text=element_blank(), axis.title=element_blank(),
+            panel.background=element_blank(), axis.ticks=element_blank())
+    
+  pdf(file=file.path(SUMMARY_PLOTS_FOLDER, file_name), w=12, h=8)
+  print(cowplot::plot_grid(all_aggregated_cluster_dynamics, indexP_cluster_map, nrow=1, rel_widths=c(1, 0.5)))
+  
+    # plot the individual plots
+  for (ii in 1:num_indexP_clusters) {
+    this_cluster_summarised_timeseries <- summarised_timeseries %>% 
+      filter(indexP_cluster==ii)
+    
+    individual_cluster_dynamics <- ggplot() + 
+      geom_line(data=this_cluster_summarised_timeseries, mapping=aes(x=month, y=incidence, color=factor(cluster)), lwd=2) + 
+      scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6))) + 
+      theme_bw() 
+    
+    cluster_map <- ggplot() + 
+      geom_sf(data=cluster_bra2_list[[ii]], 
+              mapping=aes(geometry=geometry), color="grey", fill="grey", lwd=0) + 
+      geom_sf(data=filter(cluster_bra2_list[[ii]], !is.na(incidence_cluster)),
+              mapping=aes(geometry=geometry, color=incidence_cluster, fill=incidence_cluster), lwd=0) +
+      geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) +
+      theme(panel.grid=element_blank(), axis.line=element_blank(),
+            axis.text=element_blank(), axis.title=element_blank(),
+            panel.background=element_blank(), axis.ticks=element_blank())
+    
+     print(cowplot::plot_grid(individual_cluster_dynamics, cluster_map, nrow=1, rel_widths=c(1, 0.5)))
+  }
+    
+  a <- dev.off()
+  
+}
+cluster_log_incidence_opt_clusters_list <- list(3, 3, 2, 2, 2, 2)
+tmp <- plot_cluster_log_incidence_aggregated_dynamics(bra2_log_incidence_typical_year_data=bra2_log_incidence_typical_year_matrix, 
+                                                      num_indexP_clusters=6, indexP_clustering_data=indexP_hc, 
+                                                      indexP_city_id_order=indexP_city_id_order, 
+                                                      bra2=bra2, bra1=bra1, 
+                                                      num_clusters_list=cluster_log_incidence_opt_clusters_list, 
+                                                      log_incidence_clustering_data_list=cluster_bra2_log_incidence_hc_list, 
+                                                      city_id_order_list=cluster_bra2_log_incidence_city_id_order_list, 
+                                                      file_name=paste0("cluster_adj_log_incidence_clustering_aggregate_dynamics_plots.pdf"))
+```
+For clusters 1 to 4, each Index P cluster maps over to a distinct spectrum of incidence dynamics. For cluster 5 (Roraima cluster) and cluster 6 (Amapa cluster), there are two distinct incidence dynamics, which is because for most municipalities in these areas, the incidence dynamics are largely governed by precipitation dynamics rather than Index P dynamics. 
+
+## Temperature Clustering
+
+We perform some clustering analysis to identify the optimal number of clusters for the temperature dynamics within each Index P cluster. 
+
+We start by computing the Pearson correlation coefficient of temperature during a typical year between each pair of municipalities. 
+
+```{r eval=FALSE}
+compute_diss_matrix <- function(typical_year_data, city_id_order) {
+  corr_matrix <- matrix(NA, ncol=length(city_id_order), nrow=length(city_id_order))
+  for (ii in seq_along(city_id_order)) {
+    print(ii)
+    for (jj in seq_along(city_id_order)) {
+      corr <- cor(x=typical_year_data[, ii], 
+                  y=typical_year_data[, jj], 
+                  method="pearson")
+      if (is.na(corr)) {stop(); print(jj)}
+      corr_matrix[ii, jj] <- corr
+    }
+  }
+  diss_matrix <- 1 - corr_matrix
+  return(diss_matrix)
+}
+
+# complete data
+bra2_temp_typical_year_matrix <- bra2_entire_period_temp_summary_data[["typical_year"]]
+no_data_columns <- which(apply(bra2_temp_typical_year_matrix, 2, function(x) any(is.na(x==0))))
+if (length(no_data_columns)!=0) bra2_temp_typical_year_matrix <- bra2_temp_typical_year_matrix[, -no_data_columns]
+bra2_temp_typical_year_matrix <- bra2_temp_typical_year_matrix[, -1]
+city_id_order <- colnames(bra2_temp_typical_year_matrix)
+
+bra2_temp_diss_matrix <- compute_diss_matrix(bra2_temp_typical_year_matrix, city_id_order)
+saveRDS(bra2_temp_diss_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                       "bra2_temp_pearson_dissimilarity_matrix.rds"))
+saveRDS(city_id_order, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                      "bra2_temp_pearson_dissimilarity_matrix_city_id_order.rds"))
+saveRDS(bra2_temp_typical_year_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                               "bra2_temp_typical_year_matrix.rds"))
+```
+
+## Humidity Clustering
+
+We perform some clustering analysis to identify the optimal number of clusters for the humidity dynamics within each Index P cluster. 
+
+We start by computing the Pearson correlation coefficient of humidity during a typical year between each pair of municipalities. 
+
+```{r eval=FALSE}
+compute_diss_matrix <- function(typical_year_data, city_id_order) {
+  corr_matrix <- matrix(NA, ncol=length(city_id_order), nrow=length(city_id_order))
+  for (ii in seq_along(city_id_order)) {
+    print(ii)
+    for (jj in seq_along(city_id_order)) {
+      corr <- cor(x=typical_year_data[, ii], 
+                  y=typical_year_data[, jj], 
+                  method="pearson")
+      if (is.na(corr)) {stop(); print(jj)}
+      corr_matrix[ii, jj] <- corr
+    }
+  }
+  diss_matrix <- 1 - corr_matrix
+  return(diss_matrix)
+}
+
+# complete data
+bra2_hum_typical_year_matrix <- bra2_entire_period_hum_summary_data[["typical_year"]]
+no_data_columns <- which(apply(bra2_hum_typical_year_matrix, 2, function(x) any(is.na(x==0))))
+if (length(no_data_columns)!=0) bra2_hum_typical_year_matrix <- bra2_hum_typical_year_matrix[, -no_data_columns]
+bra2_hum_typical_year_matrix <- bra2_hum_typical_year_matrix[, -1]
+city_id_order <- colnames(bra2_hum_typical_year_matrix)
+
+bra2_hum_diss_matrix <- compute_diss_matrix(bra2_hum_typical_year_matrix, city_id_order)
+saveRDS(bra2_hum_diss_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                       "bra2_hum_pearson_dissimilarity_matrix.rds"))
+saveRDS(city_id_order, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                      "bra2_hum_pearson_dissimilarity_matrix_city_id_order.rds"))
+saveRDS(bra2_hum_typical_year_matrix, file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                               "bra2_hum_typical_year_matrix.rds"))
+```
+
+## Combined temperature/humidity clustering 
+
+We perform some clustering analysis to identify the optimal number of clusters for the combined temperature/humidity dynamics within each Index P cluster. 
+
+```{r}
+bra2_hum_diss_matrix <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                                    "bra2_hum_pearson_dissimilarity_matrix.rds"))
+bra2_temp_diss_matrix <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                                    "bra2_temp_pearson_dissimilarity_matrix.rds"))
+bra2_climate_diss_matrix <- bra2_hum_diss_matrix + bra2_temp_diss_matrix
+climate_city_id_order <- readRDS(file.path(SUMMARY_RESULTS_FOLDER, 
+                                             "bra2_hum_pearson_dissimilarity_matrix_city_id_order.rds"))
+bra2_hum_typical_year_matrix <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                               "bra2_hum_typical_year_matrix.rds"))
+```
+
+Let's perform hierarchical clustering using Ward's method criterion for the municipalities within each Index P cluster.  
+
+```{r eval=FALSE}
+NUM_CLUSTERS <- 6
+cut_indexP_clustering_data <- cutree(indexP_hc, k=NUM_CLUSTERS)
+cluster_bra2_climate_diss_matrices_list <- list()
+cluster_bra2_climate_city_id_order_list <- list()
+cluster_bra2_climate_hc_list <- list()
+for (ii in 1:NUM_CLUSTERS) {
+  municipality_ids <- indexP_city_id_order[which(cut_indexP_clustering_data==ii)]
+  municipality_ids <- municipality_ids[sapply(municipality_ids, 
+                                              function(x) x %in% colnames(bra2_hum_typical_year_matrix))]
+  municipality_pos <- sapply(municipality_ids, function(x) which(colnames(bra2_hum_typical_year_matrix)==x))
+  cluster_bra2_climate_diss_matrix <- bra2_climate_diss_matrix[municipality_pos, municipality_pos]
+  climate_hc <- agnes(x=cluster_bra2_climate_diss_matrix, diss=TRUE, method = "ward")
+
+  cluster_bra2_climate_diss_matrices_list[[ii]] <- cluster_bra2_climate_diss_matrix
+  cluster_bra2_climate_city_id_order_list[[ii]] <- municipality_ids
+  cluster_bra2_climate_hc_list[[ii]] <- climate_hc
+}
+saveRDS(cluster_bra2_climate_hc_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_bra2_climate_pearson_hierarchial_clustering_ward_list.rds"))
+saveRDS(cluster_bra2_climate_diss_matrices_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_bra2_climate_diss_matrix_list.rds"))
+saveRDS(cluster_bra2_climate_city_id_order_list,
+        file=file.path(SUMMARY_RESULTS_FOLDER, "cluster_bra2_climate_city_id_order_list.rds"))
+```
+
+```{r}
+cluster_bra2_climate_hc_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_bra2_climate_pearson_hierarchial_clustering_ward_list.rds"))
+cluster_bra2_climate_diss_matrices_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_bra2_climate_diss_matrix_list.rds"))
+cluster_bra2_climate_city_id_order_list <- readRDS(file=file.path(SUMMARY_RESULTS_FOLDER,
+                                                             "cluster_bra2_climate_city_id_order_list.rds"))
+```
+
+## Index P biome figures
+
+Let's first plot the summary figure for the aggregate Index P dynamics. 
+
+```{r}
+plot_indexP_cluster_aggregated_dynamics_complete_plots <- function(bra2_indexP_typical_year_data, bra2, bra1, 
+                                                                   indexP_clustering_data, city_id_order, num_clusters, file_names) {
+  
+  # organise the data
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_clusters) 
+  cluster_summarised_timeseries_list <- list()
+  for (ii in 1:num_clusters) {
+    municipality_ids <- city_id_order[which(cut_indexP_clustering_data==ii)]
+    cluster_timeseries <- bra2_indexP_typical_year_data[, municipality_ids]
+    cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+    cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+    cluster_timeseries_data <- data.frame(cluster=ii, month=1:12, 
+                                          mean_indexP=cluster_mean_timeseries, sd_indexP=cluster_sd_timeseries)
+    cluster_summarised_timeseries_list[[ii]] <- cluster_timeseries_data
+  }
+  cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>% 
+    mutate(cluster=factor(cluster, 1:num_clusters))
+  
+  bra2 %<>% 
+    left_join(data.frame(city_id=city_id_order, cluster=cut_indexP_clustering_data), by="city_id") %>% 
+    mutate(cluster=factor(cluster, 1:num_clusters))
+  
+  cluster_colors <- brewer.pal(9, "Set1")[c(2, 1, 4, 3, 8, 9)]
+    
+  # plot the aggregated cluster maps
+  aggregated_cluster_dynamics <- ggplot() + 
+    geom_line(data=mutate(cluster_summarised_timeseries, 
+                          month=ifelse(month>6, month, month+12)), 
+              mapping=aes(x=month, y=mean_indexP, color=cluster, group=cluster), lwd=2) + 
+    # geom_ribbon(data=cluster_summarised_timeseries,
+    #             mapping=aes(x=month, ymin=mean_indexP-sd_indexP, ymax=mean_indexP+sd_indexP,
+    #                         fill=cluster, group=cluster), alpha=0.1) +
+    labs(y="Index P", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="bottom", legend.title.align=0.5)
+  cluster_legend <- as_ggplot(get_legend(aggregated_cluster_dynamics))
+  aggregated_cluster_dynamics <- aggregated_cluster_dynamics + theme(legend.position="none")
+  
+  
+  cluster_map <- ggplot() +
+    geom_sf(data=bra2, mapping=aes(geometry=geometry, color=cluster, fill=cluster), lwd=0) +
+    geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) +
+    scale_fill_manual(breaks=seq(1, 6), values=cluster_colors, guide="none") + 
+    scale_color_manual(breaks=seq(1, 6), values=cluster_colors, guide="none") + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank())
+  
+  #dendrogram
+  indexP_hclust <- as.hclust(indexP_hc)
+  indexP_dend <- as.dendrogram(indexP_hclust) %>%
+    set("labels_cex", 10^-9) %>%
+    set("branches_k_color", k=6, value=cluster_colors)
+
+  pA <- cowplot::plot_grid(aggregated_cluster_dynamics, cluster_map, nrow=1, rel_widths=c(1, 0.4), labels=c("A", "B"))
+  scale_factor=0.3
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_names[1]), w=8.27, h=11.69*scale_factor)
+  print(pA)
+  a <- dev.off()
+  
+  scale_factor=0.4
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_names[2]), w=8.27, h=11.69*scale_factor)
+  plot(indexP_dend, axes=FALSE)
+  a <- dev.off()
+  
+  scale_factor=0.4
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_names[3]), w=8.27, h=11.69*scale_factor)
+  print(cluster_legend)
+  a <- dev.off()
+  
+}
+plot_indexP_cluster_aggregated_dynamics_complete_plots(bra2_indexP_typical_year_data=bra2_indexP_summary_data[["typical_year_mean"]], 
+                                                       bra2=bra2, bra1=bra1, 
+                                                       indexP_clustering_data=indexP_hc, 
+                                                       city_id_order=indexP_city_id_order, 
+                                                       num_clusters=6, 
+                                                       file_names=c("indexP_cluster_aggregated_dynamics_complete_plots.pdf", 
+                                                                    "indexP_cluster_dengrogram.pdf", 
+                                                                    "indexP_cluster_legend.pdf"))
+```
+
+Now, let's plot the Index P dynamics by cluster and map them over to the incidence dynamics. 
+
+```{r}
+plot_indexP_cluster_individual_dynamics_complete_plots <- function(bra2_indexP_typical_year_data, bra2_log_incidence_typical_year_data,
+                                                                   indexP_clustering_data, city_id_order, num_indexP_clusters, 
+                                                                   log_incidence_clustering_data_list, city_id_order_list, 
+                                                                   file_name) {
+  # organise the data
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_indexP_clusters) 
+  cluster_summarised_timeseries_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    municipality_ids <- city_id_order[which(cut_indexP_clustering_data==ii)]
+    cluster_timeseries <- bra2_indexP_typical_year_data[, municipality_ids]
+    cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+    cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+    cluster_timeseries_data <- data.frame(cluster=ii, month=1:12, 
+                                          mean_indexP=cluster_mean_timeseries, sd_indexP=cluster_sd_timeseries)
+    cluster_summarised_timeseries_list[[ii]] <- cluster_timeseries_data
+  }
+  indexP_cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>% 
+    mutate(cluster=factor(cluster, levels=1:num_indexP_clusters, labels=paste("Cluster ", 1:num_indexP_clusters))) %>%
+    group_by(cluster) %>% 
+    mutate(peak_month=month[which(mean_indexP==max(mean_indexP))])
+  
+  # constants about clusters
+  num_clusters_list <- list(1, 1, 1, 1, 2, 2)
+  
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_indexP_clusters)
+  bra2 %<>% 
+    left_join(data.frame(city_id=indexP_city_id_order, indexP_cluster=cut_indexP_clustering_data), by="city_id")
+  
+  # organise the data
+  summarised_timeseries_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    log_incidence_clustering_data <- log_incidence_clustering_data_list[[ii]]
+    num_clusters <- num_clusters_list[[ii]]
+    city_id_order <- city_id_order_list[[ii]]
+    
+    cut_log_incidence_clustering_data <- cutree(log_incidence_clustering_data, k=num_clusters) 
+    cluster_summarised_timeseries_list <- list()
+    for (jj in 1:num_clusters) {
+      municipality_ids <- city_id_order[which(cut_log_incidence_clustering_data==jj)]
+      cluster_timeseries <- bra2_log_incidence_typical_year_data[, municipality_ids]
+      cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+      cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+      cluster_timeseries_data <- data.frame(cluster=jj, month=1:12, 
+                                            mean_incidence=cluster_mean_timeseries, sd_incidence=cluster_sd_timeseries)
+      cluster_summarised_timeseries_list[[jj]] <- cluster_timeseries_data
+      
+    }
+    cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>% 
+      mutate(indexP_cluster=ii) %>% 
+      select(indexP_cluster, cluster, month, mean_incidence, sd_incidence)
+    summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+  }
+  incidence_summarised_timeseries <- do.call(rbind, summarised_timeseries_list) %>% 
+    as.data.frame() %>% 
+    mutate(indexP_cluster=factor(indexP_cluster, levels=1:num_indexP_clusters, labels=paste("Cluster ", 1:num_indexP_clusters))) %>%
+    mutate(cluster=as_factor(cluster)) %>% 
+    group_by(indexP_cluster, cluster) %>% 
+    mutate(peak_month=month[which(mean_incidence==max(mean_incidence))])
+  
+  # define cluster color palette
+  cluster_colors <- brewer.pal(9, "Set1")[c(2, 1, 4, 3, 8, 9)]
+  
+  # plot the cluster map
+  cluster_map <- ggplot() +
+    geom_sf(data=mutate(bra2, indexP_cluster=factor(indexP_cluster, 1:6)), 
+            mapping=aes(geometry=geometry, color=indexP_cluster, fill=indexP_cluster), lwd=0) +
+    geom_sf(data=bra1, mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.5) +
+    scale_fill_manual(breaks=seq(1, 6), values=cluster_colors, name="Cluster", labels=seq(1, 6), 
+                      guide=guide_legend(nrow=2, title.position="top")) + 
+    scale_color_manual(breaks=seq(1, 6), values=cluster_colors, guide="none") + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(legend.position="bottom", legend.title.align=0.4, legend.margin=margin(0, 0, 0, 0), 
+          legend.key.size=unit(0.5, units="cm"), legend.text=element_text(size=9), legend.title=element_text(size=9)) + 
+    theme(legend.position="none")
+  
+  # plot the index P dynamics
+  aggregated_indexP_cluster_dynamics <- ggplot(data=mutate(indexP_cluster_summarised_timeseries, 
+                                                    month=ifelse(month>6, month, month+12))) + 
+    geom_line(mapping=aes(x=month, y=mean_indexP, color=cluster, group=cluster), lwd=1) + 
+    geom_ribbon(mapping=aes(x=month, ymin=mean_indexP-sd_indexP, ymax=mean_indexP+sd_indexP,
+                            fill=cluster, group=cluster), alpha=0.3) +
+    labs(y="Index P", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_fill_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    scale_y_continuous(breaks=0:3, labels=paste("   ", 0:3, sep="")) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="bottom", legend.title.align=0.5, panel.grid.major.y=element_blank(),
+          panel.grid.minor=element_blank(), 
+          axis.text.x=element_blank(), axis.title.x=element_blank()) + 
+    facet_wrap(~cluster, nrow=1)
+  cluster_legend <- as_ggplot(get_legend(aggregated_indexP_cluster_dynamics))
+  aggregated_indexP_cluster_dynamics <- aggregated_indexP_cluster_dynamics + theme(legend.position="none")
+  
+  
+  # plot the aggregate incidence cluster maps
+  cluster_labs <- paste0("Cluster ", 1:num_indexP_clusters)
+  names(cluster_labs) <- 1:num_indexP_clusters
+  aggregated_incidence_cluster_dynamics <- ggplot(data=mutate(incidence_summarised_timeseries, 
+                                                    month=ifelse(month>6, month, month+12))) + 
+    geom_line(mapping=aes(x=month, y=mean_incidence, color=indexP_cluster, linetype=cluster), lwd=1) + 
+    geom_ribbon(mapping=aes(x=month, ymin=mean_incidence-sd_incidence, ymax=mean_incidence+sd_incidence,
+                            fill=indexP_cluster, group=interaction(indexP_cluster, cluster)), alpha=0.3) +
+    labs(y="Incidence", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_fill_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    scale_y_continuous(breaks=c(0, 1, 2, 3), labels=str2expression(c("1", "10",  "10^{2}",  "10^{3}"))) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="none", legend.title.align=0.5, axis.text.x=element_text(size=6), 
+          strip.background=element_blank(), strip.text=element_blank(), panel.grid.minor=element_blank(), 
+          panel.grid.major.y=element_blank()) + 
+    facet_wrap(~indexP_cluster, nrow=1)
+  
+  pA <- cowplot::plot_grid(NULL, cluster_map, nrow=1, rel_widths=c(1, 0.45), labels=c("A", ""))
+  pB1 <- cowplot::plot_grid(aggregated_indexP_cluster_dynamics, nrow=1)
+  pB2 <- cowplot::plot_grid(aggregated_incidence_cluster_dynamics, nrow=1)
+  pB <- cowplot::plot_grid(pB1, pB2, ncol=1, rel_heights=c(1, 1.1), labels=c("B"))
+  p <- cowplot::plot_grid(pA, pB, ncol=1, rel_heights=c(0.6, 1))
+  scale_factor=0.5
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(p)
+  a <- dev.off()
+  
+}
+tmp <- plot_indexP_cluster_individual_dynamics_complete_plots(bra2_indexP_typical_year_data=bra2_indexP_summary_data[["typical_year_mean"]], 
+                                                       bra2_log_incidence_typical_year_data=bra2_log_incidence_typical_year_matrix, 
+                                                       indexP_clustering_data=indexP_hc, 
+                                                       city_id_order=indexP_city_id_order, 
+                                                       log_incidence_clustering_data_list=cluster_bra2_log_incidence_hc_list, 
+                                                       city_id_order_list=cluster_bra2_log_incidence_city_id_order_list, 
+                                                       num_indexP_clusters=6, 
+                                                       file_name=c("indexP_cluster_individual_dynamics_complete_plots.pdf"))
+```
+
+Now, let's plot the temperature and humidity dynamics for the Index P clusters. 
+
+```{r}
+plot_indexP_cluster_climate_individual_dynamics_complete_plots <- function(bra2_indexP_typical_year_data,
+                                                                           bra2_temp_typical_year_data, 
+                                                                           bra2_hum_typical_year_data, 
+                                                                           temp_clustering_data_list, temp_city_id_order_list,
+                                                                           hum_clustering_data_list, hum_city_id_order_list,
+                                                                           climate_clustering_data_list, climate_city_id_order_list,
+                                                                           indexP_clustering_data, city_id_order, num_indexP_clusters, 
+                                                                           file_name) {
+  # organise the data
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_indexP_clusters)
+  cluster_summarised_timeseries_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    municipality_ids <- city_id_order[which(cut_indexP_clustering_data==ii)]
+    cluster_timeseries <- bra2_indexP_typical_year_data[, municipality_ids]
+    cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+    cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+    cluster_timeseries_data <- data.frame(cluster=ii, month=1:12,
+                                          mean_indexP=cluster_mean_timeseries, sd_indexP=cluster_sd_timeseries)
+    cluster_summarised_timeseries_list[[ii]] <- cluster_timeseries_data
+  }
+  indexP_cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>%
+    mutate(cluster=factor(cluster, levels=1:num_indexP_clusters, labels=paste("Cluster ", 1:num_indexP_clusters)))
+  
+  # constants about clusters
+  cut_indexP_clustering_data <- cutree(indexP_clustering_data, k=num_indexP_clusters)
+  
+  # organise the temp data
+  climate_num_clusters_list <- list(1, 2, 1, 2, 1, 1)
+  summarised_timeseries_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    # temp_clustering_data <- temp_clustering_data_list[[ii]]
+    # num_clusters <- temp_num_clusters_list[[ii]]
+    # city_id_order <- temp_city_id_order_list[[ii]]
+    
+    temp_clustering_data <- climate_clustering_data_list[[ii]]
+    num_clusters <- climate_num_clusters_list[[ii]]
+    city_id_order <- climate_city_id_order_list[[ii]]
+    
+    cut_temp_clustering_data <- cutree(temp_clustering_data, k=num_clusters) 
+    cluster_summarised_timeseries_list <- list()
+    for (jj in 1:num_clusters) {
+      municipality_ids <- city_id_order[which(cut_temp_clustering_data==jj)]
+      cluster_timeseries <- bra2_temp_typical_year_data[, municipality_ids]
+      cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+      cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+      cluster_timeseries_data <- data.frame(cluster=jj, month=1:12, 
+                                            mean_temp=cluster_mean_timeseries, sd_temp=cluster_sd_timeseries)
+      cluster_summarised_timeseries_list[[jj]] <- cluster_timeseries_data
+      
+    }
+    cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>% 
+      mutate(indexP_cluster=ii) %>% 
+      select(indexP_cluster, cluster, month, mean_temp, sd_temp)
+    summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+  }
+  temp_summarised_timeseries <- do.call(rbind, summarised_timeseries_list) %>% 
+    as.data.frame() %>% 
+    mutate(indexP_cluster=factor(indexP_cluster, levels=1:num_indexP_clusters, labels=paste("Cluster ", 1:num_indexP_clusters))) %>%
+    mutate(cluster=as_factor(cluster))
+  
+    # organise the hum data
+  climate_num_clusters_list <- list(1, 2, 1, 2, 1, 1)
+  summarised_timeseries_list <- list()
+  for (ii in 1:num_indexP_clusters) {
+    # hum_clustering_data <- hum_clustering_data_list[[ii]]
+    # num_clusters <- hum_num_clusters_list[[ii]]
+    # city_id_order <- hum_city_id_order_list[[ii]]
+    
+    hum_clustering_data <- climate_clustering_data_list[[ii]]
+    num_clusters <- climate_num_clusters_list[[ii]]
+    city_id_order <- climate_city_id_order_list[[ii]]
+    
+    cut_hum_clustering_data <- cutree(hum_clustering_data, k=num_clusters) 
+    cluster_summarised_timeseries_list <- list()
+    for (jj in 1:num_clusters) {
+      municipality_ids <- city_id_order[which(cut_hum_clustering_data==jj)]
+      cluster_timeseries <- bra2_hum_typical_year_data[, municipality_ids]
+      cluster_mean_timeseries <- rowMeans(cluster_timeseries)
+      cluster_sd_timeseries <- apply(cluster_timeseries, 1, sd)
+      cluster_timeseries_data <- data.frame(cluster=jj, month=1:12, 
+                                            mean_hum=cluster_mean_timeseries, sd_hum=cluster_sd_timeseries)
+      cluster_summarised_timeseries_list[[jj]] <- cluster_timeseries_data
+      
+    }
+    cluster_summarised_timeseries <- do.call(rbind, cluster_summarised_timeseries_list) %>% 
+      mutate(indexP_cluster=ii) %>% 
+      select(indexP_cluster, cluster, month, mean_hum, sd_hum)
+    summarised_timeseries_list[[ii]] <- cluster_summarised_timeseries
+  }
+  hum_summarised_timeseries <- do.call(rbind, summarised_timeseries_list) %>% 
+    as.data.frame() %>% 
+    mutate(indexP_cluster=factor(indexP_cluster, levels=1:num_indexP_clusters, labels=paste("Cluster ", 1:num_indexP_clusters))) %>%
+    mutate(cluster=as_factor(cluster))
+  
+  # define cluster color palette
+  cluster_colors <- brewer.pal(9, "Set1")[c(2, 1, 4, 3, 8, 9)]
+  
+    # plot the aggregated cluster map
+  aggregated_indexP_cluster_dynamics <- ggplot(data=mutate(indexP_cluster_summarised_timeseries, 
+                                                    month=ifelse(month>6, month, month+12))) + 
+    geom_line(mapping=aes(x=month, y=mean_indexP, color=cluster, group=cluster), lwd=1) + 
+    geom_ribbon(mapping=aes(x=month, ymin=mean_indexP-sd_indexP, ymax=mean_indexP+sd_indexP,
+                            fill=cluster, group=cluster), alpha=0.3) +
+    labs(y="Index P", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_fill_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    scale_y_continuous(breaks=0:3, labels=paste(0:3, " ")) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="bottom", legend.title.align=0.5,
+          axis.text.x=element_blank(), axis.title.x=element_blank()) + 
+    theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) + 
+    facet_wrap(~cluster, nrow=1)
+  cluster_legend <- as_ggplot(get_legend(aggregated_indexP_cluster_dynamics))
+  aggregated_indexP_cluster_dynamics <- aggregated_indexP_cluster_dynamics + theme(legend.position="none")
+  
+    
+  # plot the temperature aggregated cluster map
+  cluster_labs <- paste0("Cluster ", 1:num_indexP_clusters)
+  names(cluster_labs) <- 1:num_indexP_clusters
+  aggregated_temp_cluster_dynamics <- ggplot(data=mutate(temp_summarised_timeseries, 
+                                                              month=ifelse(month>6, month, month+12))) + 
+    geom_line(mapping=aes(x=month, y=mean_temp, color=indexP_cluster, linetype=cluster), lwd=1) + 
+    geom_ribbon(mapping=aes(x=month, ymin=mean_temp-sd_temp, ymax=mean_temp+sd_temp,
+                            fill=indexP_cluster, group=interaction(indexP_cluster, cluster)), alpha=0.3) +
+    labs(y="Temperature (°C)", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_fill_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="none", legend.title.align=0.5, axis.text.x=element_blank(), axis.title.x=element_blank(), 
+          strip.background=element_blank(), strip.text=element_blank()) + 
+    theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) + 
+    facet_wrap(~indexP_cluster, nrow=1)
+  
+  # plot the humidity aggregated cluster map
+  cluster_labs <- paste0("Cluster ", 1:num_indexP_clusters)
+  names(cluster_labs) <- 1:num_indexP_clusters
+  aggregated_hum_cluster_dynamics <- ggplot(data=mutate(hum_summarised_timeseries, 
+                                                         month=ifelse(month>6, month, month+12))) + 
+    geom_line(mapping=aes(x=month, y=mean_hum, color=indexP_cluster, linetype=cluster), lwd=1) + 
+    geom_ribbon(mapping=aes(x=month, ymin=mean_hum-sd_hum, ymax=mean_hum+sd_hum,
+                            fill=indexP_cluster, group=interaction(indexP_cluster, cluster)), alpha=0.3) +
+    labs(y="Relative humidity (%)", x="Month") + 
+    scale_color_manual(values=cluster_colors, name="Cluster") + 
+    scale_fill_manual(values=cluster_colors, name="Cluster") + 
+    scale_x_continuous(breaks=c(seq(7, 12), 12+seq(1, 6)),  labels=c(seq(7, 12), seq(1, 6)), expand=c(0.01, 0.01)) + 
+    theme_bw() + 
+    guides(color=guide_legend(nrow=2, title.position="top")) + 
+    theme(legend.position="none", legend.title.align=0.5, axis.text.x=element_text(size=6), 
+          strip.background=element_blank(), strip.text=element_blank()) + 
+    theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) + 
+    facet_wrap(~indexP_cluster, nrow=1)
+  
+  pA <- cowplot::plot_grid(aggregated_indexP_cluster_dynamics, nrow=1)
+  pB <- cowplot::plot_grid(aggregated_temp_cluster_dynamics, nrow=1)
+  pC <- cowplot::plot_grid(aggregated_hum_cluster_dynamics, nrow=1)
+  pABC <- cowplot::plot_grid(pA, pB, pC, ncol=1, rel_heights=c(1, 0.95, 1.1))
+  scale_factor=0.45
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(pABC)
+  a <- dev.off()
+  
+}
+tmp <- plot_indexP_cluster_climate_individual_dynamics_complete_plots(bra2_indexP_typical_year_data=bra2_indexP_summary_data[["typical_year_mean"]], 
+                                                                      bra2_temp_typical_year_data=bra2_entire_period_temp_summary_data[["typical_year"]], 
+                                                                      bra2_hum_typical_year_data=bra2_entire_period_hum_summary_data[["typical_year"]], 
+
+                                                                      temp_clustering_data_list=cluster_bra2_temp_hc_list, 
+                                                                      temp_city_id_order_list=cluster_bra2_temp_city_id_order_list, 
+                                                                      
+                                                                      hum_clustering_data_list=cluster_bra2_hum_hc_list, 
+                                                                      hum_city_id_order_list=cluster_bra2_hum_city_id_order_list, 
+                                                                      
+                                                                      climate_clustering_data_list=cluster_bra2_climate_hc_list, 
+                                                                      climate_city_id_order_list=cluster_bra2_climate_city_id_order_list, 
+                                                                      
+                                                                      indexP_clustering_data=indexP_hc, 
+                                                                      city_id_order=indexP_city_id_order, 
+                                                                      num_indexP_clusters=6, 
+                                                                      
+                                                                      file_name=c("indexP_cluster_climate_individual_dynamics_complete_plots.pdf"))
+```

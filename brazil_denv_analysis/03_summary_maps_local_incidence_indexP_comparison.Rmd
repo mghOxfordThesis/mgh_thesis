@@ -1,0 +1,456 @@
+---
+title: "Analysis of DENV in Brazil: comparison of local incidence and Index P"
+output:
+  html_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(2, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", mai = rep(.1, 4))
+    else NULL
+  }
+)
+
+knitr::opts_chunk$set(echo       = TRUE,
+                      cache      = TRUE, 
+                      margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center")
+```
+
+```{css, echo=FALSE}
+pre {
+max-height: 300px;
+overflow-y: auto;
+}
+
+pre[class] {
+max-height: 100px;
+}
+```
+
+## Links to local data sets
+
+Here we use the following links to data.
+
+```{r}
+CASE_DATA_FOLDER <- "data/bra2_cases/"
+SF_DATA_FOLDER <- "data/bra2_sf/"
+POPULATION_DATA_FOLDER <- "data/bra2_population/"
+SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
+STAN_MODELS_FOLDER <- "stan_models/"
+
+# raw data 
+bra1_path <- file.path(SF_DATA_FOLDER, "bra1_sf_data.rds")
+bra2_path <- file.path(SF_DATA_FOLDER, "simplified_bra2_sf_data.rds")
+bra2_pop_data_path <- file.path(POPULATION_DATA_FOLDER, "bra2_population_data_2000_2014.rds")
+bra2_case_data_path <- file.path(CASE_DATA_FOLDER, "bra_DENV_case_data_2000_2014.rds")
+
+# processed index P summary data
+bra2_indexP_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_summary_data.Rdata")
+```
+
+Here, we define the file paths to the output. 
+
+```{r}
+SUMMARY_PLOTS_FOLDER <- "output/plots/"
+SUMMARY_RESULTS_FOLDER <- "output/results/"
+```
+
+Change them accordingly if you want to run the script locally on your computer.
+
+## Preambule
+
+This document focuses on comparing local DENV incidence to estimated transmission intensity (i.e. Index P). 
+
+## Packages
+
+The needed packages:
+
+```{r message = FALSE}
+library(pacman)
+p_load(tidyverse, sf, RColorBrewer, ggnewscale, magrittr, pracma, cowplot, rstan)
+rstan_options(auto_write = TRUE)
+```
+
+## Useful colour palettes
+
+```{r}
+levColors <- rev(brewer.pal(11, "RdYlBu")) # colourblind friendly
+pal <- rev(brewer.pal(11, "Spectral"))
+full_pal <- c(pal[1:7], colorRampPalette(pal[8:11])(15))
+full_pal2 <- c(colorRampPalette(pal[1:3])(8), pal[4:7], colorRampPalette(pal[8:11])(8))
+```
+
+## Raw data
+
+### Case data
+
+We read in the raw case data at the municipality level in Brazil. 
+
+```{r}
+bra2_case_data <- readRDS(file=bra2_case_data_path)
+```
+
+Let's get the state/city to city id mapping, so we can add it to other sets of data for ease of data management later on. 
+
+```{r}
+city_cityid_mapping <- bra2_case_data %>%
+  select(city_id, state, city) %>%
+  unique()
+```
+
+### Spatial data 
+
+Here, we read in and format the spatial polygons data for Brazil. 
+
+```{r}
+bra1 <- readRDS(bra1_path) %>%
+  mutate(x=st_coordinates(st_centroid(geometry))[,1], y=st_coordinates(st_centroid(geometry))[,2])
+
+bra2 <- readRDS(bra2_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+### Population data
+
+Here, we read in the population data at the municipality level in Brazil. 
+
+```{r}
+bra2_pop_data <- readRDS(file=bra2_pop_data_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+Let's also add population density data at the municipality level, which will be used extensively in the following analyses. 
+
+```{r}
+bra2_pop_data %<>%
+  left_join(st_drop_geometry(bra2), by=c("state", "city", "city_id")) %>%
+  mutate(den_km2=n/area_m2*10^6)
+```
+
+## Processed summary data 
+
+### Index P data
+
+Here, we read in the Index P summary data at the municipality level in Brazil. 
+
+```{r}
+load(bra2_indexP_summary_data_path) #region_basic_summary_data
+bra2_indexP_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+```
+
+## Local DENV incidence and Index P explorations
+
+In this section, I attempt to show that retrospective estimates of Index P are largely consistent with observed DENV incidence across Brazil, a climatically and demographically diverse landscape.
+
+We start by presenting the mean index P during a typical year and the mean yearly DENV incidence for each municipality on a map of Brazil. Mean index P has a direct biological interpretation as the average transmission potential of each female mosquito during a typical year. 
+
+### Local DENV incidence
+
+Let's calculate some summary statistics of the local DENV incidence in each municipality. Specifically, we calculate the mean yearly incidence. 
+
+```{r}
+# compute the mean population in each municipality over the entire period
+summarised_bra2_pop_data <- bra2_pop_data %>%
+  group_by(state, city, city_id) %>% 
+  summarise(n=mean(n, na.rm=TRUE), .groups="keep")
+
+# compute incidence in each region
+incidence_data <- bra2_case_data %>% 
+  filter(!grepl(pattern="Município ignorado", x=city, fixed=TRUE)) %>% 
+  group_by(city_id, state, city, year) %>%
+  summarise(cases=sum(cases, na.rm=FALSE)+1, .groups="keep") %>%             ### ADD ONE TO CASES EACH YEAR
+  left_join(bra2_pop_data, by=c("state", "city", "city_id", "year")) %>%
+  mutate(incidence=cases/n) %>% 
+  ungroup() %>%
+  group_by(city_id, state, city) %>%
+  summarise(mean_yearly_incidence=mean(incidence, na.rm=FALSE)*10^5, .groups="keep") %>%
+  as.data.frame() %>%
+  left_join(summarised_bra2_pop_data, by=c("state", "city", "city_id")) %>%
+  left_join(st_drop_geometry(bra2), by=c("state", "city", "city_id")) %>%
+  mutate(density=n/area_m2*10^6)
+```
+
+
+Recall that there are four municipalities with incomplete case data for the period from 2000 to 2014: Pará, Mojuí dos Campos; Santa Catarina, Pescaria Brava; Santa Catarina, Balneário Rincão; Mato Grosso do Sul, Paraíso das Águas. 
+
+### Index P
+
+Let's calculate mean Index P during a typical year. 
+
+```{r}
+# compute the mean yearly Index P
+mean_typical_year_indexP <- bra2_indexP_summary_data[["typical_year_mean"]] %>%
+  as.data.frame() %>%
+  gather(key="city_id", value="typical_year_indexP", 2:ncol(.)) %>%
+  group_by(city_id) %>%
+  summarise(mean_typical_year_indexP=mean(typical_year_indexP), .groups="keep")
+```
+There are three municipalities without index P data: Pernambuco, Fernando de Noronha; Bahia, Itaparica; Bahia, Madre de Deus. These municipalities are either islands or archipelagos whose size is too small relative to the resolution of the available climate data used to estimate index P. 
+
+### Model Fitting 
+
+Let's fit some saturation functions to the relationship between mean yearly AUC index P and mean yearly incidence. 
+
+```{r}
+# organize the data 
+fit_data <- incidence_data %>% 
+  left_join(mean_typical_year_indexP, by="city_id") %>% 
+  mutate(log_mean_yearly_incidence = log10(mean_yearly_incidence)) %>% 
+  select(city_id, state, city, log_mean_yearly_incidence, mean_typical_year_indexP, density, area_m2, n) %>% 
+  filter(!is.na(log_mean_yearly_incidence) & !is.na(mean_typical_year_indexP))
+```
+
+Let's start by fitting a maximum effect model of the form: $I = I_0 + \frac{I_{max} P^{\gamma}}{I_{50}^{\gamma}+P^{\gamma}}$ where we estimate $\gamma$, $y_{50}$, $y_0$ and $y_{max}$. 
+
+```{r eval=FALSE, include=FALSE}
+N <- nrow(fit_data)
+exposure <- fit_data$mean_typical_year_indexP
+response <- fit_data$log_mean_yearly_incidence
+input_data <- list(N=N, exposure=exposure, response=response)
+# basic_emax_fit <- stan(file=file.path(STAN_MODELS_FOLDER, "emax_model.stan"), data = input_data, chains=4, 
+#                        warmup=1000, iter=2000, cores = 1, control = list(adapt_delta = 0.95), seed=100)
+adv_emax_fit <- stan(file=file.path(STAN_MODELS_FOLDER, "emax_model_with_e0.stan"), data = input_data, chains=4,
+                     warmup=1000, iter=2000, cores = 1, control = list(adapt_delta = 0.95), seed=100)
+```
+
+Let's see how well the maximum effect model fits the data. Specifically, we look at the posterior predictive checks. 
+
+```{r}
+generate_quantities <- function(stan_model_fit, N, parameters, fit_data) {
+  posterior_distributions <- rstan::extract(stan_model_fit)[parameters]
+  Emax <- posterior_distributions[["Emax"]][1:N]
+  E50 <- posterior_distributions[["E50"]][1:N]
+  gamma <- posterior_distributions[["gamma"]][1:N]
+  sigma <- posterior_distributions[["sigma"]][1:N]
+  if ("E0" %in% parameters) E0 <- posterior_distributions[["E0"]][1:N]
+  else E0 <- rep(0, N)
+  
+  mean_typical_year_indexP <- fit_data$mean_typical_year_indexP
+  output <- matrix(NA, nrow=N, ncol=length(mean_typical_year_indexP))
+  for (ii in 1:nrow(output)) {
+    output[ii, ] <- rnorm(n=length(mean_typical_year_indexP), 
+                          mean=E0[ii]+(Emax[ii]*mean_typical_year_indexP^gamma[ii])/(E50[ii]^gamma[ii]+mean_typical_year_indexP^gamma[ii]), 
+                          sd=sigma[ii])
+  }
+  colnames(output) <- fit_data$city_id
+  return(output)
+}
+set.seed(1)
+# basic_predicted_quantities <- generate_quantities(stan_model_fit=basic_emax_fit, N=4000, 
+#                                                   parameters=c("Emax", "E50", "gamma", "sigma"), fit_data=fit_data)
+adv_predicted_quantities <- generate_quantities(stan_model_fit=adv_emax_fit, N=4000,
+                                                  parameters=c("Emax", "E50", "gamma", "sigma", "E0"), fit_data=fit_data)
+
+# create some summaries
+summarise_predicted_quantities <- function(predicted_quantities, fit_data) {
+  city_id_order <- colnames(predicted_quantities)
+  summarised_predicted_quantities  <- predicted_quantities %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    cbind(city_id_order, .) %>% 
+    setNames(c("city_id", paste("sim", 1:(ncol(.)-1), sep=""))) %>% 
+    gather(key="sim", value="value", 2:ncol(.)) %>%
+    group_by(city_id) %>% 
+    summarise(mean=mean(value), l50=quantile(value, 0.25), u50=quantile(value, 0.75), 
+              l90=quantile(value, 0.05), u90=quantile(value, 0.95), .groups="keep") %>% 
+    left_join(select(fit_data, city_id, mean_typical_year_indexP, log_mean_yearly_incidence), by="city_id")
+  return(summarised_predicted_quantities)
+}
+# summarised_basic_predicted_quantities <- summarise_predicted_quantities(basic_predicted_quantities, fit_data)
+summarised_adv_predicted_quantities <- summarise_predicted_quantities(adv_predicted_quantities, fit_data)
+```
+
+## Local DENV incidence and Index P figures
+
+In this section, we plot the figures to be presented in the dissertation. 
+
+```{r}
+plot_case_indexP_burden_complete_plots <- function(indexP_data, incidence_data, stan_model_fit, parameters, bra2, bra1, 
+                                                   summarised_predicted_quantities, fit_data, file_name) {
+   incidence_data %<>% 
+    mutate(log10_mean_yearly_incidence=log10(mean_yearly_incidence)) %>%
+    left_join(bra2, by=c("state", "city", "city_id")) %>% 
+    st_as_sf()
+  
+  indexP_data %<>%
+    left_join(bra2, by=c("city_id")) %>% 
+    st_as_sf()
+  
+  posterior_mean_estimates <- sapply(parameters, function(x) mean(rstan::extract(stan_model_fit)[[x]]))
+  if (!("E0" %in% names(posterior_mean_estimates))) posterior_mean_estimates <- c(posterior_mean_estimates, "E0"=0)
+  E0 <- posterior_mean_estimates["E0"]
+  Emax <- posterior_mean_estimates["Emax"]
+  E50 <- posterior_mean_estimates["E50"]
+  gamma <- posterior_mean_estimates["gamma"]
+  
+  predicted_incidence_data <- st_drop_geometry(indexP_data) %>% 
+    mutate(predicted_incidence=E0+(Emax*mean_typical_year_indexP^gamma)/(E50^gamma+mean_typical_year_indexP^gamma)) %>% 
+    left_join(bra2, by=c("city_id")) %>% 
+    st_as_sf()
+  
+  amazon_states <- c("Acre", "Amapá", "Amazonas", "Maranhão", "Pará", "Rondônia", "Rondônia")
+  intervals <- c(0, 0.5, 2.33)
+  complete_data <- incidence_data %>% 
+    st_drop_geometry() %>% 
+    mutate(log10_mean_yearly_incidence=log10(mean_yearly_incidence)) %>%
+    left_join(mean_typical_year_indexP, by="city_id") %>% 
+    filter(!is.na(mean_typical_year_indexP) & !is.na(log10_mean_yearly_incidence)) %>% 
+    mutate(indexP_interval=findInterval(mean_typical_year_indexP, intervals)) %>% 
+    group_by(indexP_interval) %>% 
+    mutate(mean_indexP_interval=mean(log10_mean_yearly_incidence, na.rm=TRUE), sd_indexP_interval=sd(log10_mean_yearly_incidence, na.rm=TRUE), 
+           IQR=abs(diff(quantile(log10_mean_yearly_incidence, c(0.75, 0.25), na.rm=TRUE))), 
+           Q1=quantile(log10_mean_yearly_incidence, c(0.25), na.rm=TRUE)) %>% 
+    mutate(low_outlier_bound=Q1 - 1.5*IQR) %>% 
+    mutate(low_outlier=log10_mean_yearly_incidence<low_outlier_bound)
+    
+  # incidence map
+  outlier_map_data <- complete_data %>% 
+    filter((low_outlier) & state%in%amazon_states) %>% 
+    left_join(bra2, by=c("city_id", "state", "city")) %>%
+    st_as_sf()
+  case_burden_plot <- ggplot() + 
+    geom_sf(data=incidence_data, 
+            mapping=aes(geometry=geometry, fill=log10_mean_yearly_incidence, color=log10_mean_yearly_incidence), lwd=0) + 
+    geom_sf(data=bra1, 
+            mapping=aes(geometry=geometry), color="grey49", fill=NA, lwd=0.1) + 
+    geom_sf(data=outlier_map_data, 
+            mapping=aes(geometry=geometry), fill=NA, color="black", lwd=0.2) + 
+    scale_fill_gradientn(colours=full_pal2, na.value="grey", 
+                         breaks=seq(0, 3, 1), limits=c(-0.16, 3.5), labels=c("1", "10", "100", "1000"), name="Incidence") +
+    scale_color_gradientn(colours=full_pal2, na.value="darkgrey", guide="none", 
+                          breaks=seq(0, 3, 1), limits=c(-0.16, 3.5), name=NULL) + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    guides(fill=guide_colorbar(ticks.colour="black", frame.colour="black", title.position="top")) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.45, "cm"), legend.text=element_text(size=9), 
+          legend.title=element_text(size=9), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0, 0, 0), "cm"))
+  
+  # mean index P map
+  indexP_burden_plot <- ggplot() + 
+    geom_sf(data=indexP_data, 
+            mapping=aes(geometry=geometry, fill=mean_typical_year_indexP, color=mean_typical_year_indexP), lwd=0) + 
+    geom_sf(data=bra1, mapping=aes(geometry=geometry), color="grey49", fill=NA, lwd=0.1) + 
+    scale_fill_gradientn(colours=full_pal, na.value="grey", 
+                         breaks=seq(0, 2, 0.5), limits=c(0, 2.33), name="Mean Index P\n(typical year)") +
+    scale_color_gradientn(colours=full_pal, na.value="darkgrey", guide="none", 
+                          breaks=seq(0, 2, 0.5), limits=c(0, 2.33)) + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    guides(fill=guide_colorbar(ticks.colour="black", frame.colour="black", title.position="top")) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) +  
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.45, "cm"), legend.text=element_text(size=9), 
+          legend.title=element_text(size=9), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0, 0, 0), "cm"))
+  
+  # predicted incidence map
+  predicted_case_burden_plot <- ggplot() + 
+    geom_sf(data=predicted_incidence_data,  
+            mapping=aes(geometry=geometry, fill=predicted_incidence, color=predicted_incidence), lwd=0) + 
+    geom_sf(data=bra1, 
+            mapping=aes(geometry=geometry), color="grey49", fill=NA, lwd=0.1) + 
+    scale_fill_gradientn(colours=full_pal2, na.value="grey", labels=as.character(c(1, 10, 100, 1000)), 
+                         breaks=seq(0, 3, 1), limits=c(-0.16, 3.5), name="Predicted\nincidence") +
+    scale_color_gradientn(colours=full_pal2, na.value="darkgrey", guide="none", 
+                          breaks=seq(0, 3, 1), limits=c(-0.16, 3.5)) + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    guides(fill=guide_colorbar(ticks.colour="black", frame.colour="black", title.position="top")) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.45, "cm"), legend.text=element_text(size=9), 
+          legend.title=element_text(size=9), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0, 0, 0), "cm"))
+  
+  # scatter plot of index P measure and incidence with density  intervals <- c(0, 0.25, 0.5, 2.33)
+  low_outlier_bound_data <- complete_data %>% 
+    select(indexP_interval, low_outlier_bound) %>% 
+    unique()
+  low_outlier_bounds <- low_outlier_bound_data %>% pull(low_outlier_bound)
+  names(low_outlier_bounds) <- low_outlier_bound_data %>% pull(indexP_interval)
+  low_bound_rect <- data.frame(xmin=intervals[-length(intervals)], xmax=intervals[-1],
+                               ymin=-Inf, ymax=low_outlier_bounds[as.character(1:(length(intervals)-1))])
+
+  scatter_plot_density <- ggplot() + 
+    geom_rect(data=low_bound_rect, mapping=aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), fill="grey", color="grey") + 
+    geom_point(data=filter(arrange(complete_data, -desc(density)), !low_outlier | !(state%in%amazon_states)), 
+               aes(x=mean_typical_year_indexP, y=log10_mean_yearly_incidence, fill=log10(density)), size=2, shape=21, color="grey4") + 
+    geom_point(data=filter(complete_data, low_outlier & state%in%amazon_states), 
+               aes(x=mean_typical_year_indexP, y=log10_mean_yearly_incidence, fill=log10(density)), 
+               size=1.5, shape=21, color="black", stroke=1) + 
+    scale_fill_gradientn(colours=levColors, na.value="black", guide=guide_colorbar(order=1), 
+                         limits=c(-1, 4.2), 
+                         breaks=c(-1, 0, 1, 2, 3, 4), 
+                         labels=c("0.1", "1", "10", "100", "1000", "10,000")) + 
+    scale_x_continuous(breaks=seq(0, 2, 0.5), limits=c(0, 2.33), expand=c(0, 0)) + 
+    scale_y_continuous(breaks=seq(-1, 3, 1), labels=c("0.1", "1", "10", "100", "1000")) + 
+    guides(fill=guide_colorbar(title.position="top", ticks.colour="black", frame.colour="black")) + 
+    labs(fill=expression(paste("Population/", km^2)), x="Mean index P (typical year)", y="Mean yearly incidence") + 
+    theme(panel.background=element_blank(), legend.justification="center", 
+          legend.title.align=0.5, legend.key.width=unit(1, "cm"), legend.key.height=unit(0.25, "cm"), 
+          legend.key.size=unit(0.75, "cm"), legend.position=c(0.8, 0.15), 
+          legend.direction="horizontal", legend.background=element_blank(), legend.box.background=element_blank()) + 
+    theme(panel.background=element_blank(), panel.border = element_rect(color="black", fill=NA)) + 
+    theme(plot.margin=unit(c(0.1, 0.1, 0.1, 0.1), "cm"))
+  
+  # posterior predictive check
+  percent_above <- mutate(summarised_predicted_quantities, above=log_mean_yearly_incidence>u90) %>% 
+    pull(above) %>% 
+    sum()/nrow(summarised_predicted_quantities)*100
+  percent_below <- mutate(summarised_predicted_quantities, below=log_mean_yearly_incidence<l90) %>% 
+    pull(below) %>% 
+    sum()/nrow(summarised_predicted_quantities)*100
+  my_color <- brewer.pal(9, "Set1")[5]
+  posterior_predictive_check <- ggplot() + 
+    geom_point(data=fit_data, mapping=aes(x=mean_typical_year_indexP, y=log_mean_yearly_incidence), size=2, alpha=0.5) + 
+    geom_line(data=summarised_predicted_quantities, mapping=aes(x=mean_typical_year_indexP, y=mean), color=my_color) + 
+    geom_ribbon(data=summarised_predicted_quantities, 
+                mapping=aes(x=mean_typical_year_indexP, ymin=l90, ymax=u90), color=my_color, fill=my_color, alpha=0.4) + 
+    scale_x_continuous(breaks=seq(0, 2, 0.5), limits=c(0, 2.33), expand=c(0, 0.05)) + 
+    scale_y_continuous(breaks=c(-1, 0, 1, 2, 3), labels=c("0.1", "1", "10", "100", "1000")) + 
+    geom_label(data=data.frame(x=c(0.05, 1.3), y=c(3.15, 0.25), label=paste0(round(c(percent_below, percent_above), 0), "%")), 
+               mapping=aes(x=x, y=y, label=label), size=2.5) + 
+    labs(x="", y="") + 
+    theme(panel.background=element_blank(), panel.border = element_rect(color="black", fill=NA))
+  
+  row1_plots <- cowplot::plot_grid(case_burden_plot, indexP_burden_plot, predicted_case_burden_plot, nrow=1, labels=c("A", "B", "C"))
+  row2_plots <- cowplot::plot_grid(scatter_plot_density, labels=c("D"))
+  row3_plots <- cowplot::plot_grid(posterior_predictive_check, NULL, nrow=1, labels=c("E", ""), rel_widths=c(1, 0.8))
+  scale_factor <- 0.65
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(cowplot::plot_grid(row1_plots, row2_plots, row3_plots, nrow=3, rel_heights=c(1, 1, 0.5)))
+  a <- dev.off()
+}
+plot_case_indexP_burden_complete_plots(indexP_data=mean_typical_year_indexP, 
+                                       stan_model_fit=adv_emax_fit, 
+                                       parameters=c("Emax", "E50", "gamma", "E0"), 
+                                       incidence_data=incidence_data, bra2=bra2, bra1=bra1,
+                                       summarised_predicted_quantities=summarised_adv_predicted_quantities, 
+                                       fit_data=fit_data, 
+                                       file_name="case_indexP_burden_maps_and_scatter_plot.pdf")
+```
+

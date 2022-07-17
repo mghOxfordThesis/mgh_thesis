@@ -1,0 +1,373 @@
+---
+title: "Analysis of DENV in Brazil: local incidence"
+output:
+  html_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(2, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", mai = rep(.1, 4))
+    else NULL
+  }
+)
+
+knitr::opts_chunk$set(echo       = TRUE,
+                      cache      = TRUE, 
+                      margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center")
+```
+
+```{css, echo=FALSE}
+pre {
+max-height: 300px;
+overflow-y: auto;
+}
+
+pre[class] {
+max-height: 100px;
+}
+```
+
+## Links to local data sets
+
+Here we use the following links to data.
+
+```{r}
+# directories
+CASE_DATA_FOLDER <- "data/bra2_cases/"
+SF_DATA_FOLDER <- "data/bra2_sf/"
+POPULATION_DATA_FOLDER <- "data/bra2_population/"
+SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
+
+# raw data 
+bra1_path <- file.path(SF_DATA_FOLDER, "bra1_sf_data.rds")
+bra2_path <- file.path(SF_DATA_FOLDER, "simplified_bra2_sf_data.rds")
+bra1_macroregions_path <- file.path(SF_DATA_FOLDER, "bra1_macroregions.xlsx")
+bra2_pop_data_path <- file.path(POPULATION_DATA_FOLDER, "bra2_population_data_2000_2014.rds")
+bra2_case_data_path <- file.path(CASE_DATA_FOLDER, "bra_DENV_case_data_2000_2014.rds")
+
+# summary data
+bra2_log_incidence_typical_year_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER,
+                                                               "region_typical_year_log_incidence_data.Rdata")
+```
+
+Here, we define the file paths to the output. 
+
+```{r}
+SUMMARY_PLOTS_FOLDER <- "output/plots/"
+SUMMARY_RESULTS_FOLDER <- "output/results/"
+```
+
+Change them accordingly if you want to run the script locally on your computer.
+
+## Preambule
+
+This document focuses on describing local DENV incidence across space (municipality level) and across time (2000-2014). 
+
+## Packages
+
+The needed packages:
+
+```{r message = FALSE}
+library(pacman)
+p_load(tidyverse, sf, RColorBrewer, readxl, magrittr, ggh4x)
+```
+
+## Raw data
+
+### Case data
+
+We read in the raw case data at the municipality level in Brazil. 
+
+```{r}
+bra2_case_data <- readRDS(file=bra2_case_data_path)
+```
+
+Let's get the state/city to city id mapping, so we can add it to other sets of data for ease of data management later on. 
+
+```{r}
+city_cityid_mapping <- bra2_case_data %>% 
+  select(city_id, state, city) %>% 
+  unique()
+```
+
+### Spatial data 
+
+Here, we read in and format the spatial polygons data for Brazil. 
+
+```{r}
+bra1_macroregions <- read_excel(path=bra1_macroregions_path)
+
+bra1 <- readRDS(bra1_path) %>% 
+  mutate(x=st_coordinates(st_centroid(geometry))[,1], y=st_coordinates(st_centroid(geometry))[,2]) %>% 
+  left_join(bra1_macroregions, by="state")
+
+bra2 <- readRDS(bra2_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+### Population data
+
+Here, we read in the population data at the municipality level in Brazil. 
+
+```{r}
+bra2_pop_data <- readRDS(file=bra2_pop_data_path) %>% 
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+Let's also add population density data at the municipality level, which will be used extensively in the following analyses. 
+
+```{r}
+bra2_pop_data %<>%
+  left_join(st_drop_geometry(bra2), by=c("state", "city", "city_id")) %>% 
+  mutate(den_km2=n/area_m2*10^6)
+```
+
+## Processed summary data 
+
+### Case data
+
+```{r}
+load(bra2_log_incidence_typical_year_summary_data_path) #region_typical_year_cases_data
+bra2_log_incidence_typical_year_summary_data <- region_typical_year_cases_data
+rm(region_typical_year_cases_data)
+```
+
+## DENV incidence
+
+In this section, we simply describe DENV incidence across Brazil. 
+
+### Data management
+
+There are four municipalities with incomplete case data for the period from 2000 to 2014: Pará, Mojuí dos Campos; Santa Catarina, Pescaria Brava; Santa Catarina, Balneário Rincão; Mato Grosso do Sul, Paraíso das Águas. 
+
++ Santa Catarina, Pescaria Brava was established in 2013. 
++ Balneário Rincão; Mato Grosso do Sul was established in 2013. 
++ Pará, Mojuí dos Campos was established in 2013. 
++ Mato Grosso do Sul, Paraíso das Águas has incomplete data for all years except 2004 and 2014. 
+
+Let's consolidate the data for ease of presentation. 
+
+```{r}
+# compute the mean population in each municipality over the entire period
+summarised_bra2_pop_data <- bra2_pop_data %>%
+  group_by(state, city, city_id) %>% 
+  summarise(n=mean(n, na.rm=TRUE), .groups="keep")
+
+# compute incidence in each region
+incidence_data <- bra2_case_data %>% 
+  filter(!grepl(pattern="Município ignorado", x=city, fixed=TRUE)) %>% 
+  group_by(city_id, state, city, year) %>%
+  summarise(cases=sum(cases, na.rm=FALSE)+1, .groups="keep") %>%
+  left_join(bra2_pop_data, by=c("state", "city", "city_id", "year")) %>%
+  mutate(incidence=cases/n) %>% 
+  ungroup() %>%
+  group_by(city_id, state, city) %>%
+  summarise(mean_yearly_incidence=mean(incidence, na.rm=FALSE)*10^5, 
+            cum_cases=sum(cases, na.rm=FALSE), .groups="keep") %>%
+  as.data.frame() %>%
+  left_join(summarised_bra2_pop_data, by=c("state", "city", "city_id")) %>%
+  mutate(cum_incidence=cum_cases/n*10^5)
+
+aggregated_mun_monthly_case_data <-  bra2_case_data %>% 
+  left_join(bra2_pop_data, by=c("state", "city", "city_id", "year")) %>% 
+  group_by(city_id, state, city, year, month) %>% 
+  summarise(cases=sum(cases, na.rm=FALSE), n=n, .groups="keep") %>%
+  as.data.frame() %>% 
+  mutate(date=as.Date(paste0(year, "-", month, "-", "2"))) %>% 
+  mutate(incidence=cases/n*10^5)
+
+state_cum_incidence_data <- bra2_case_data %>% 
+  left_join(select(st_drop_geometry(bra1), state, region), by="state") %>% 
+  left_join(bra2_pop_data, by=c("state", "city", "city_id", "year")) %>% 
+  group_by(region, state, year, month) %>% 
+  summarise(cases=sum(cases, na.rm=TRUE), 
+            n=sum(n, na.rm=TRUE), .groups="keep") %>% 
+  ungroup() %>% group_by(region, state) %>% 
+  summarise(cum_incidence=sum(cases)/mean(n)*10^5, .groups="keep") %>% 
+  as.data.frame()
+```
+
+### Figures
+
+Here, we plot a summary figure for the local DENV incidence across Brazil. 
+
+```{r}
+plot_DENV_incidence_plot <- function(incidence_data, state_cum_incidence_data, aggregated_mun_monthly_case_data, 
+                                     bra2_incidence_typical_year_summary_data, 
+                                     bra2, bra1, file_name) {
+  # necessary colour palette
+  pal <- rev(brewer.pal(11, "Spectral"))
+  full_pal2 <- c(colorRampPalette(pal[1:3])(8), pal[4:7], colorRampPalette(pal[8:11])(8))
+  
+  # organise incidence data
+  incidence_data %<>% 
+    mutate(log10_mean_yearly_incidence = log10(mean_yearly_incidence), 
+           log10_cum_cases=log10(cum_cases+1)) %>% 
+    left_join(bra2, by=c("state", "city", "city_id")) %>% 
+    st_as_sf()
+  
+  # map of mean yearly incidence in each muncipality
+  focal_cities <- c(520870, 150140, 320530, 230440)
+  x_adj <- c(-1, 1.1, 2.65, 1.5)
+  y_adj <- c(-0.85, 1.8, 0, 1.5)
+  label_adj <- data.frame(city_id=focal_cities, x_adj=x_adj, y_adj=y_adj)
+  focal_bra2 <- bra2 %>% 
+    filter(city_id %in% focal_cities) %>% 
+    mutate(x=st_coordinates(st_centroid(geometry))[,1], y=st_coordinates(st_centroid(geometry))[,2]) %>%
+    left_join(mutate(label_adj, city_id=as.character(city_id)), by="city_id")
+  
+  case_burden_plot <- ggplot() + 
+    geom_sf(data=incidence_data, 
+            mapping=aes(geometry=geometry, fill=log10_mean_yearly_incidence, color=log10_mean_yearly_incidence), lwd=0) + 
+    geom_sf(data=bra1, 
+            mapping=aes(geometry=geometry), color="black", fill=NA, lwd=0.1) + 
+    geom_point(data=focal_bra2, mapping=aes(x=x, y=y), shape=24, fill="black", colour="black", size=1.5) + 
+    geom_text(data=focal_bra2, mapping=aes(x=x+x_adj, y=y+y_adj, label=city), size=2) + 
+    scale_fill_gradientn(colours=full_pal2, na.value="grey", 
+                         breaks=seq(0, 3, 1), limits=c(-0.16, 3.5), labels=c("1", "10", "100", "1000"), name="Mean yearly\nincidence") +
+    scale_color_gradientn(colours=full_pal2, na.value="darkgrey", guide="none", 
+                          breaks=seq(0, 3, 1), limits=c(-0.16, 3.5), name=NULL) + 
+    guides(fill=guide_colorbar(ticks.colour="black", frame.colour="black")) + 
+    scale_x_continuous(limits=c(-73, -36)) +
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    # theme(legend.position="right", legend.title.align=0, legend.justification="center", 
+    #       legend.key.width=unit(0.3, "cm"), legend.title=element_text(size=8), legend.text=element_text(size=8), 
+    #       legend.key.height=unit(0.5, "cm")) + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.4, "cm"), legend.text=element_text(size=8), 
+          legend.title=element_text(size=8), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(plot.margin=unit(c(0, 0, 0, 0), "cm"))
+  
+  # map of Brazil with macroregions and states labelled
+  region_colors <- brewer.pal(5, "Set1")
+  size_scale=0.5
+  mod_bra1 <- bra1
+  mod_bra1 %<>% 
+    mutate(state=ifelse(state=="Distrito Federal", "Distrito\nFederal", state)) %>% 
+    mutate(state=ifelse(state=="Mato Grosso do Sul", "Mato Grosso\ndo Sul", state)) %>% 
+    mutate(state=ifelse(state=="Rio Grande do Norte", "Rio Grande\ndo Norte", state)) %>% 
+    mutate(state=ifelse(state=="Rio Grande do Sul", "Rio Grande\ndo Sul", state))
+  state_names <- sort(pull(st_drop_geometry(mod_bra1), state))
+  x_adj <- c(-0.7, 3.2, 0, 0, 0, 0.2, 0, 4.5, 0, 0, 0, 0, 0.3, 0, 4.0, 0, 6.2, 0, 5.2, 3.7, 0, 0, 0.5, 5.5, -0.75, 2.4, 0)
+  y_adj <- c(0.5, 0, 0.2, 0, 0, 0.5, 1.2, 0, -0.5, 0, 0, 0, -0.5, 0, 0, 0, 0, -0.5, 0, 1.5, 0, -0.6, -1, 0, 0.5, -0.8, -.7)
+  size <- c(3, 3, 3, 3, 3, 3, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3)*size_scale
+  color <- c("white", region_colors[2], "white", "white", "white", "white", "white", 
+             region_colors[4], "white", "white", "white", "white", "white", 
+             "white", region_colors[2], "white", region_colors[2], "white", region_colors[4], 
+             region_colors[2], "white", "white", "white", region_colors[5], "white", region_colors[2], "white")
+  mod_bra1 %<>% 
+    left_join(data.frame(state=state_names, x_adj=x_adj, y_adj=y_adj, size=size, color=color), by="state")
+  legend_title_features <- data.frame(region=c("North", "Northeast", "Central-West", "Southeast", "South"), 
+                                      color=region_colors, 
+                                      x=c(-70, -35, -65, -40, -62), 
+                                      y=c(4, 0, -20, -25, -30))
+  state_plot <- ggplot(data=mod_bra1) + 
+    geom_sf(mapping=aes(geometry=geometry, fill=region), color="white", lwd=0.1) + 
+    geom_text(mapping=aes(x=x+x_adj, y=y+y_adj, label=state), size=size, color=color, fontface="bold") + 
+    scale_fill_manual(breaks=c("North", "Northeast", "Central-West", "Southeast", "South"), 
+                      values=brewer.pal(5, "Set1")) + 
+    scale_x_continuous(limits=c(-73, -29)) + 
+    theme(legend.title=element_blank(), legend.position=c(0.2, 0.3), 
+          legend.key.size = unit(0.3, "cm"),
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(plot.margin=margin(0, 0, 0, 0))
+  
+  # barplot of cumulative incidence in each state for 2000-2014
+  states <- state_cum_incidence_data %>% 
+    arrange(desc(region), desc(state)) %>% 
+    pull(state) %>% 
+    unique()
+  state_cum_incidence_data %<>%
+    mutate(state=factor(state, states))
+  state_cum_incidence_plot <- ggplot(data=state_cum_incidence_data) + 
+    geom_bar(mapping=aes(x=state, y=cum_incidence, fill=region), color="black", stat="identity") + 
+    scale_fill_manual(breaks=c("North", "Northeast", "Central-West", "Southeast", "South"), 
+                      values=brewer.pal(5, "Set1")) + 
+    labs(y="Cumulative incidence") + 
+    theme_bw() + 
+    theme(axis.title.y=element_blank(), axis.text=element_text(size=8)) + 
+    theme(legend.position="none", panel.grid=element_blank(), axis.title=element_text(size=8)) + 
+    coord_flip()
+  
+  # line plots of monthly incidence in four selected municipalities
+  focal_cities <- c(520870, 150140, 320530, 230440)
+  aggregated_mun_monthly_case_data %<>% 
+    filter(city_id %in% focal_cities) %>% 
+    mutate(region_name=paste0(city, ", ", state)) %>% 
+    mutate(log10_incidence=ifelse(incidence<0.1, log10(0.1), log10(incidence)))
+  number_months <- 12*15
+  dates <- unique(pull(aggregated_mun_monthly_case_data, date))
+  tick_labels <- rep("", number_months)
+  tick_labels[seq(1, number_months, 12)] <- 2000:2014
+  monthly_incidence_lineplot <- ggplot(data=aggregated_mun_monthly_case_data)  +
+    geom_line(mapping=aes(y=log10_incidence, x=date, color=city_id)) +
+    geom_ribbon(mapping=aes(x=date, ymin=-1, ymax=log10_incidence, fill=city_id), alpha=0.3) + 
+    labs(y="Incidence") +
+    scale_x_continuous(minor_breaks=dates,
+                       breaks=dates[seq(1, number_months, 12)],
+                       labels=paste("", 2000:2014, sep=""),
+                       expand=c(0.01, 0.01), guide="axis_minor", name=NULL) +
+    scale_fill_manual(breaks=focal_cities, values=brewer.pal(5, "Set1")[c(3, 1, 4, 2)]) + 
+    scale_color_manual(breaks=focal_cities, values=brewer.pal(5, "Set1")[c(3, 1, 4, 2)]) + 
+    scale_y_continuous(breaks=c(-1, 0, 1, 2, 3), labels=c("0.1", "1", "10", "100", "1000")) + 
+    theme_bw() +
+    theme(ggh4x.axis.ticks.length.minor=rel(0.5), axis.text.x=element_text(angle=90, vjust=0.6)) +
+    theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank(), legend.position="none", 
+          axis.text=element_text(size=6), axis.title=element_text(size=8), strip.text=element_text(size=8)) + 
+    facet_wrap(~region_name)
+  
+  # line plot of DENV incidence during a typical year for four selected municipalities
+  bra2_incidence_typical_year_summary_data %<>%
+    filter(city_id %in% focal_cities) %>%
+    mutate(city_id=factor(city_id, c(520870, 320530, 230440, 150140))) %>%
+    mutate(cases=log10(exp(cases)-1)) %>% 
+    mutate(month=factor(month, levels=c(7:12, 1:6)))
+  
+  typical_year_incidence_lineplot <- ggplot(data=bra2_incidence_typical_year_summary_data)  +
+    geom_line(mapping=aes(y=cases, x=month, color=city_id, group=city_id)) +
+    geom_ribbon(mapping=aes(x=month, ymin=0, ymax=cases, group=city_id, fill=city_id), alpha=0.5) + 
+    labs(y="Incidence", x="Month") +
+    scale_fill_manual(breaks=focal_cities, values=brewer.pal(5, "Set1")[c(3, 1, 4, 2)]) +
+    scale_color_manual(breaks=focal_cities, values=brewer.pal(5, "Set1")[c(3, 1, 4, 2)]) +
+    scale_y_continuous(limits=c(0, 2.11), breaks=c(0, 1, 2), labels=as.character(c(1, 10, 100)))  + 
+    theme_bw() +
+    theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank(), legend.position="none", 
+          axis.text=element_text(size=8), axis.title=element_text(size=8))
+  
+  # combine plots into a single figure
+  pAB <- cowplot::plot_grid(state_plot, case_burden_plot, labels=c("A", "B"), nrow=1)
+  pD <- cowplot::plot_grid(state_cum_incidence_plot, typical_year_incidence_lineplot, labels=c("C", "E"), ncol=1, rel_heights=c(1, 0.5))
+  pABD <- cowplot::plot_grid(pAB, monthly_incidence_lineplot, labels=c("", "D"), ncol=1)
+  pABCD <- cowplot::plot_grid(pABD, pD, rel_widths=c(1, 0.5), nrow=1)
+  scale_factor <- 0.45
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(pABCD)
+  a <- dev.off()
+}
+plot_DENV_incidence_plot(incidence_data=incidence_data, 
+                         aggregated_mun_monthly_case_data=aggregated_mun_monthly_case_data, 
+                         state_cum_incidence_data=state_cum_incidence_data, 
+                         bra2_incidence_typical_year_summary_data=bra2_log_incidence_typical_year_summary_data, 
+                         bra2=bra2, bra1=bra1,
+                         file_name="local_incidence_figure.pdf")
+```

@@ -1,0 +1,228 @@
+---
+title: "Analysis of DENV in Brazil: local climate"
+output:
+  html_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(2, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", mai = rep(.1, 4))
+    else NULL
+  }
+)
+
+knitr::opts_chunk$set(echo       = TRUE,
+                      cache      = TRUE, 
+                      margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center")
+```
+
+```{css, echo=FALSE}
+pre {
+max-height: 300px;
+overflow-y: auto;
+}
+
+pre[class] {
+max-height: 100px;
+}
+```
+
+## Links to local data sets
+
+Here we use the following links to data.
+
+```{r}
+CASE_DATA_FOLDER <- "data/bra2_cases/"
+SF_DATA_FOLDER <- "data/bra2_sf/"
+SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
+
+
+# raw data 
+bra2_path <- file.path(SF_DATA_FOLDER, "simplified_bra2_sf_data.rds")
+bra2_case_data_path <- file.path(CASE_DATA_FOLDER, "bra_DENV_case_data_2000_2014.rds")
+
+# processed climate summary data
+bra2_entire_period_temp_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_temperature_summary_data.Rdata")
+bra2_entire_period_hum_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_humidity_summary_data.Rdata")
+bra2_entire_period_prec_summary_data_path <- file.path(SUMMARY_OUTPUT_DATA_FOLDER, "region_basic_precipitation_summary_data.Rdata")
+```
+
+Here, we define the file paths to the output. 
+
+```{r}
+SUMMARY_PLOTS_FOLDER <- "output/plots/"
+SUMMARY_RESULTS_FOLDER <- "output/results/"
+```
+
+Change them accordingly if you want to run the script locally on your computer.
+
+## Preambule
+
+This document focuses on describing local climate (i.e. temperature, humidity and rainfall) across municipalities in Brazil during a typical year. 
+
+## Packages
+
+The needed packages:
+
+```{r message = FALSE}
+library(pacman)
+p_load(tidyverse, sf, RColorBrewer)
+```
+
+## Raw data
+
+### Case data
+
+We read in the raw case data at the municipality level in Brazil to obtain the state/city to city id mapping for later. 
+
+```{r}
+bra2_case_data <- readRDS(file=bra2_case_data_path)
+city_cityid_mapping <- bra2_case_data %>%
+  select(city_id, state, city) %>%
+  unique()
+rm(bra2_case_data)
+```
+
+### Spatial data 
+
+Here, we read in and format the spatial polygons data for Brazil. 
+
+```{r}
+bra2 <- readRDS(bra2_path) %>%
+  left_join(city_cityid_mapping, by=c("state", "city"))
+```
+
+## Processed summary data 
+
+### Climate data 
+
+We read in the climate data at the municipality level in Brazil. 
+
+```{r}
+load(bra2_entire_period_temp_summary_data_path) #region_basic_summary_data
+bra2_entire_period_temp_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+
+load(bra2_entire_period_hum_summary_data_path) #region_basic_summary_data
+bra2_entire_period_hum_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+
+load(bra2_entire_period_prec_summary_data_path) #region_basic_summary_data
+bra2_entire_period_prec_summary_data <- region_basic_summary_data
+rm(region_basic_summary_data)
+```
+
+## Climate
+
+In this section, we plot summary maps for temperature, humidity and rainfall at the municipality level across Brazil. 
+
+```{r}
+plot_summary_climate_maps <- function(temperature_data, humidity_data, rainfall_data, bra2, bra1, file_name) {
+  
+  temp_intervals <- seq(14, 30, 2)
+  temperature_data %<>%
+    as.data.frame() %>% 
+    gather(key="city_id", value="value", 2:ncol(.)) %>% 
+    group_by(city_id) %>% 
+    summarise(mean_annual_temp=mean(value), .groups="keep") %>% 
+    mutate(temp_interval=findInterval(mean_annual_temp, temp_intervals)) %>% 
+    mutate(temp_interval=factor(temp_interval, levels=seq_along(temp_intervals[-length(temp_intervals)]))) %>% 
+    as.data.frame() %>% 
+    left_join(bra2, by=c("city_id"))
+  temp_plot <- ggplot(data=temperature_data) + 
+    geom_sf(mapping=aes(geometry=geometry, fill=temp_interval, color=temp_interval), lwd=0.1) + 
+    scale_x_continuous(limits=c(-73, -34)) + 
+    scale_fill_manual(breaks=seq_along(temp_intervals)[-length(temp_intervals)], values=rev(brewer.pal(8, "RdBu")), 
+                      labels=paste(temp_intervals[-length(temp_intervals)], temp_intervals[-1], sep="-"), drop=FALSE, 
+                      name="Mean annual\ntemperature (°C)") + 
+    scale_color_manual(breaks=seq_along(temp_intervals)[-length(temp_intervals)], values=rev(brewer.pal(8, "RdBu")), guide="none") + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.2, "cm"), legend.text=element_text(size=8), 
+          legend.title=element_text(size=8), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(plot.margin=margin(0, 0, 0, 0))
+  
+  hum_intervals <- seq(50, 100, 5)
+  humidity_data %<>%
+    as.data.frame() %>% 
+    gather(key="city_id", value="value", 2:ncol(.)) %>% 
+    group_by(city_id) %>% 
+    summarise(mean_annual_hum=mean(value), .groups="keep") %>% 
+    mutate(hum_interval=findInterval(mean_annual_hum, hum_intervals)) %>% 
+    mutate(hum_interval=factor(hum_interval, levels=seq_along(hum_intervals[-length(hum_intervals)]))) %>% 
+    as.data.frame() %>% 
+    left_join(bra2, by=c("city_id"))
+  hum_plot <- ggplot(data=humidity_data) + 
+    geom_sf(mapping=aes(geometry=geometry, fill=hum_interval, color=hum_interval), lwd=0.1) + 
+    scale_x_continuous(limits=c(-73, -34)) + 
+    scale_fill_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=brewer.pal(10, "Spectral"), 
+                      labels=paste(hum_intervals[-length(hum_intervals)], hum_intervals[-1], sep="-"), drop=FALSE, 
+                      name="Mean annual\nhumidity (%)") + 
+    scale_color_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=brewer.pal(10, "Spectral"), guide="none") + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.2, "cm"), legend.text=element_text(size=8), 
+          legend.title=element_text(size=8), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(plot.margin=margin(0, 0, 0, 0))
+  
+  prec_intervals <- c(0, seq(700, 3100, 300))
+  rainfall_data %<>%
+    as.data.frame() %>% 
+    gather(key="city_id", value="value", 2:ncol(.)) %>% 
+    group_by(city_id) %>% 
+    summarise(total_annual_prec=sum(value)*30*1000, .groups="keep") %>% 
+    mutate(prec_interval=findInterval(total_annual_prec, prec_intervals)) %>%
+    mutate(prec_interval=factor(prec_interval, levels=seq_along(prec_intervals))) %>%
+    as.data.frame() %>% 
+    left_join(bra2, by=c("city_id"))
+  
+  prec_plot <- ggplot(data=rainfall_data) + 
+    geom_sf(mapping=aes(geometry=geometry, fill=prec_interval, color=prec_interval), lwd=0.1) + 
+    scale_x_continuous(limits=c(-73, -34)) + 
+    scale_fill_manual(breaks=seq_along(prec_intervals), values=colorRampPalette(brewer.pal(9, "Blues"))(10), drop=FALSE, 
+                      labels=c("<700", 
+                               paste(prec_intervals[2:(length(prec_intervals)-1)], prec_intervals[3:(length(prec_intervals))], sep="-"), 
+                               ">3100"), 
+                      name="Total annual\nrainfall (mm)") + 
+    scale_color_manual(breaks=seq_along(prec_intervals), values=colorRampPalette(brewer.pal(9, "Blues"))(10), guide="none") + 
+    theme(legend.position=c(0.2, 0.28), 
+          legend.key.size = unit(0.2, "cm"), legend.text=element_text(size=8), 
+          legend.title=element_text(size=8), 
+          legend.box.background=element_blank(), legend.background=element_blank()) + 
+    theme(panel.grid=element_blank(), axis.line=element_blank(),
+          axis.text=element_blank(), axis.title=element_blank(),
+          panel.background=element_blank(), axis.ticks=element_blank()) + 
+    theme(plot.margin=margin(0, 0, 0, 0))
+  
+  scale_factor <- 0.25
+  pABC <- cowplot::plot_grid(temp_plot, hum_plot, prec_plot, nrow=1, labels=c("A", "B", "C"))
+  pdf(file.path(SUMMARY_PLOTS_FOLDER, file_name), w=8.27, h=11.69*scale_factor)
+  print(pABC)
+  a <- dev.off()
+  
+}
+plot_summary_climate_maps(temperature_data=bra2_entire_period_temp_summary_data[["typical_year"]],
+                          humidity_data=bra2_entire_period_hum_summary_data[["typical_year"]],
+                          rainfall_data=bra2_entire_period_prec_summary_data[["typical_year"]],
+                          bra2=bra2, bra1=bra1, file_name="climate_summary_maps.pdf")
+```
