@@ -172,10 +172,10 @@ plot_summary_climate_maps <- function(temperature_data, humidity_data, rainfall_
   hum_plot <- ggplot(data=humidity_data) + 
     geom_sf(mapping=aes(geometry=geometry, fill=hum_interval, color=hum_interval), lwd=0.1) + 
     scale_x_continuous(limits=c(-73, -34)) + 
-    scale_fill_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=brewer.pal(10, "Spectral"), 
+    scale_fill_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=rev(brewer.pal(10, "Spectral")), 
                       labels=paste(hum_intervals[-length(hum_intervals)], hum_intervals[-1], sep="-"), drop=FALSE, 
                       name="Mean annual\nhumidity (%)") + 
-    scale_color_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=brewer.pal(10, "Spectral"), guide="none") + 
+    scale_color_manual(breaks=seq_along(hum_intervals)[-length(hum_intervals)], values=rev(brewer.pal(10, "Spectral")), guide="none") + 
     theme(legend.position=c(0.2, 0.28), 
           legend.key.size = unit(0.2, "cm"), legend.text=element_text(size=8), 
           legend.title=element_text(size=8), 
