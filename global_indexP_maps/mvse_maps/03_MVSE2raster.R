@@ -527,70 +527,70 @@ gen_typical_year_rasters <- function(index) {
 
 # generate the summary rasters for entire period
 # (i.e. mean, median, sd, l95, u95)
-gen_summary_rasters <- function(index) {
-  raw_output_files <- list.files(path=paste0(MVSE_OUTPUT_DATA_FOLDER, "raw_output/"),
-                                 pattern=paste0(region, tag, "_", index, "_month_per_cell_parallel*"))
-  num_files <- length(raw_output_files)
-  for (ii in 1:num_files) {
-    raw_output_files[[ii]] <- paste0(region, tag, "_", index, "_month_per_cell_parallel", ii, ".Rdata")
-  }
-  
-  summary_index_per_cell <- list()
-  jj <- 1
-  for (ii in raw_output_files) {
-    load(paste0(MVSE_OUTPUT_DATA_FOLDER, "raw_output/", ii)) #allPs, allQs or allV0s
-    if (index=="indexP") data <- allPs
-    else if (index=="Q") data <- allQs
-    else data <- allV0s
-    
-    for (kk in seq_along(data)) {
-      if (length(data[[kk]])==1 && is.na(data[[kk]])) {summary_index_per_cell[[jj]] <- NA; jj<- jj+1; next;}
-      
-      this_data <- as.matrix(data[[kk]][, -1])
-      summary_index <- colMeans(this_data)
-      
-      summary_index_median <- median(summary_index)
-      summary_index_mean <- mean(summary_index)
-      summary_index_sd <- sd(summary_index)
-      summary_index_l95 <- quantile(summary_index, probs=0.025, names=FALSE)
-      summary_index_u95 <- quantile(summary_index, probs=0.975, names=FALSE)
-      
-      summary <- c(mean=summary_index_mean, median=summary_index_median, sd=summary_index_sd, 
-                   l95=summary_index_l95, u95=summary_index_u95)
-      summary_index_per_cell[[jj]] <- summary
-      jj <- jj + 1
-    }
-    if (index=="indexP") rm(allPs)
-    else if (index=="Q") rm(allQs)
-    else rm(allV0s)
-    rm(data); 
-  }
-  
-  # load raster template
-  load(paste0(RAW_CLIMATE_RASTER_FOLDER, region, tag, "_temp_list.Rdata")) #temp_rast_list
-  rastEx <- temp_rast_list[[1]] # use temperature raster list as a template
-  
-  output_names <- c("mean", "median", "sd", "l95", "u95")
-  for (ii in output_names) {
-    output <- list()
-    cell_data <- rep(NA, ori_c*ori_l)
-    for (jj in seq_along(summary_index_per_cell)) {
-      if (all(is.na(summary_index_per_cell[[jj]]))) cell_data[jj] <- NA
-      else cell_data[jj] <- summary_index_per_cell[[jj]][ii]
-    }
-    rastEx[] <- matrix(cell_data, ncol=ori_c, nrow=ori_l, byrow=TRUE)
-    output <- rastEx
-    output <- terra::rast(output)
-    filename <- paste0(MVSE_OUTPUT_DATA_FOLDER, "summary_output/", region, tag, "_", index, "_", "summary_", ii, "_raster.tif")
-    eval(parse(text=paste0(index, "_", "summary_", ii, "_raster", "<-", "output")))
-    eval(parse(text=paste0("terra::writeRaster(", index, "_", "summary_", ii, "_raster", ", ", "file=filename, overwrite=TRUE)")))
-  }
-}
-{
-  gen_summary_rasters(index="indexP")
-  #gen_summary_rasters(index="Q")
-  #gen_summary_rasters(index="V0")
-}
+# gen_summary_rasters <- function(index) {
+#   raw_output_files <- list.files(path=paste0(MVSE_OUTPUT_DATA_FOLDER, "raw_output/"),
+#                                  pattern=paste0(region, tag, "_", index, "_month_per_cell_parallel*"))
+#   num_files <- length(raw_output_files)
+#   for (ii in 1:num_files) {
+#     raw_output_files[[ii]] <- paste0(region, tag, "_", index, "_month_per_cell_parallel", ii, ".Rdata")
+#   }
+#   
+#   summary_index_per_cell <- list()
+#   jj <- 1
+#   for (ii in raw_output_files) {
+#     load(paste0(MVSE_OUTPUT_DATA_FOLDER, "raw_output/", ii)) #allPs, allQs or allV0s
+#     if (index=="indexP") data <- allPs
+#     else if (index=="Q") data <- allQs
+#     else data <- allV0s
+#     
+#     for (kk in seq_along(data)) {
+#       if (length(data[[kk]])==1 && is.na(data[[kk]])) {summary_index_per_cell[[jj]] <- NA; jj<- jj+1; next;}
+#       
+#       this_data <- as.matrix(data[[kk]][, -1])
+#       summary_index <- colMeans(this_data)
+#       
+#       summary_index_median <- median(summary_index)
+#       summary_index_mean <- mean(summary_index)
+#       summary_index_sd <- sd(summary_index)
+#       summary_index_l95 <- quantile(summary_index, probs=0.025, names=FALSE)
+#       summary_index_u95 <- quantile(summary_index, probs=0.975, names=FALSE)
+#       
+#       summary <- c(mean=summary_index_mean, median=summary_index_median, sd=summary_index_sd, 
+#                    l95=summary_index_l95, u95=summary_index_u95)
+#       summary_index_per_cell[[jj]] <- summary
+#       jj <- jj + 1
+#     }
+#     if (index=="indexP") rm(allPs)
+#     else if (index=="Q") rm(allQs)
+#     else rm(allV0s)
+#     rm(data); 
+#   }
+#   
+#   # load raster template
+#   load(paste0(RAW_CLIMATE_RASTER_FOLDER, region, tag, "_temp_list.Rdata")) #temp_rast_list
+#   rastEx <- temp_rast_list[[1]] # use temperature raster list as a template
+#   
+#   output_names <- c("mean", "median", "sd", "l95", "u95")
+#   for (ii in output_names) {
+#     output <- list()
+#     cell_data <- rep(NA, ori_c*ori_l)
+#     for (jj in seq_along(summary_index_per_cell)) {
+#       if (all(is.na(summary_index_per_cell[[jj]]))) cell_data[jj] <- NA
+#       else cell_data[jj] <- summary_index_per_cell[[jj]][ii]
+#     }
+#     rastEx[] <- matrix(cell_data, ncol=ori_c, nrow=ori_l, byrow=TRUE)
+#     output <- rastEx
+#     output <- terra::rast(output)
+#     filename <- paste0(MVSE_OUTPUT_DATA_FOLDER, "summary_output/", region, tag, "_", index, "_", "summary_", ii, "_raster.tif")
+#     eval(parse(text=paste0(index, "_", "summary_", ii, "_raster", "<-", "output")))
+#     eval(parse(text=paste0("terra::writeRaster(", index, "_", "summary_", ii, "_raster", ", ", "file=filename, overwrite=TRUE)")))
+#   }
+# }
+# {
+#   gen_summary_rasters(index="indexP")
+#   #gen_summary_rasters(index="Q")
+#   #gen_summary_rasters(index="V0")
+# }
 
 ##################################################################
 cat('## organize data for entire region... \n')
