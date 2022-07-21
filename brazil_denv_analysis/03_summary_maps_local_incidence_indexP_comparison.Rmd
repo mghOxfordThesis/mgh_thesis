@@ -50,7 +50,6 @@ CASE_DATA_FOLDER <- "data/bra2_cases/"
 SF_DATA_FOLDER <- "data/bra2_sf/"
 POPULATION_DATA_FOLDER <- "data/bra2_population/"
 SUMMARY_OUTPUT_DATA_FOLDER <- "output/data/summary_output/"
-STAN_MODELS_FOLDER <- "stan_models/"
 
 # raw data 
 bra1_path <- file.path(SF_DATA_FOLDER, "bra1_sf_data.rds")
@@ -222,9 +221,9 @@ N <- nrow(fit_data)
 exposure <- fit_data$mean_typical_year_indexP
 response <- fit_data$log_mean_yearly_incidence
 input_data <- list(N=N, exposure=exposure, response=response)
-# basic_emax_fit <- stan(file=file.path(STAN_MODELS_FOLDER, "emax_model.stan"), data = input_data, chains=4, 
+# basic_emax_fit <- stan(file="emax_model.stan", data = input_data, chains=4, 
 #                        warmup=1000, iter=2000, cores = 1, control = list(adapt_delta = 0.95), seed=100)
-adv_emax_fit <- stan(file=file.path(STAN_MODELS_FOLDER, "emax_model_with_e0.stan"), data = input_data, chains=4,
+adv_emax_fit <- stan(file="emax_model_with_e0.stan", data = input_data, chains=4,
                      warmup=1000, iter=2000, cores = 1, control = list(adapt_delta = 0.95), seed=100)
 ```
 
